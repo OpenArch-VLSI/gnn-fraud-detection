@@ -14,7 +14,7 @@ PC-GNN (Liu et al.) focuses on both the camouflage and class-imbalance problems 
 **Mechanism Summary:**
 RL-GNN applies a Graph Attention Network (GAT) directly to the IEEE-CIS transaction graph. To improve fraud detection performance, it couples the GAT with a Reinforcement Learning controller that optimizes the model's predictive performance (reporting 0.872 AUROC). However, RL-GNN does not explicitly target heterophily or camouflage resistance; rather, it uses the RL agent to tune the learning process directly.
 
-### 4. PROD (CIKM 2023)
+### 4. PROD (Knowledge-Based Systems 2026)
 **Mechanism Summary:**
 PROD addresses both feature-camouflage and relation-camouflage. It measures the inconsistency between a node's features and its neighborhood features, dropping edges that show high discrepancy. This creates a structurally cleaner graph that makes it difficult for a fraudster to blend into a benign neighborhood by merely establishing connections to normal users.
 
