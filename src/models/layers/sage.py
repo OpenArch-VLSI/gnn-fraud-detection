@@ -33,6 +33,26 @@ class SAGEConv(nn.Module):
                                  reduce="mean", 
                                  include_self=False)
         
+        # 2b. Zero-degree fix: self-loop
+        # scatter_reduce_ with include_self=False silently leaves zero-degree
+        # nodes as all-zero rows (PyTorch's identity value for "mean" reduction).
+        # We explicitly override this: a node with no incoming neighbors uses its
+        # own features as its "neighbor average" (self-loop), instead of a zero
+        # vector. This is a deliberate design choice for isolated nodes, not
+        # an accident of the reduction's default behavior.
+        #
+        # IMPORTANT: we use torch.where here (out-of-place) instead of masked
+        # in-place assignment (aggr_out[mask] = ...), because in-place edits to
+        # a tensor that autograd is already tracking as the output of
+        # scatter_reduce_ break gradient computation (raises a "version counter"
+        # RuntimeError during loss.backward()). torch.where builds a brand-new
+        # tensor instead of mutating aggr_out's memory, which keeps autograd's
+        # recorded history intact.
+        degree = torch.zeros(num_nodes, device=x.device, dtype=x.dtype)
+        degree.scatter_add_(0, dst, torch.ones_like(dst, dtype=x.dtype))
+        zero_degree_mask = (degree == 0).unsqueeze(1)  # [num_nodes, 1] to broadcast against [num_nodes, in_channels]
+        aggr_out = torch.where(zero_degree_mask, x, aggr_out)
+        
         # 3. Concatenate self features with aggregated neighbor features
         # concat_out: [num_nodes, in_channels * 2]
         concat_out = torch.cat([x, aggr_out], dim=-1)
