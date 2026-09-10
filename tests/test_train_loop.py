@@ -1,5 +1,6 @@
 import subprocess
 import os
+import sys
 
 def test_train_script_runs():
     # Only test if we can import and run the argparse logic without crashing on syntax errors.
@@ -9,7 +10,7 @@ def test_train_script_runs():
     script_path = os.path.join(proj_root, 'src', 'train.py')
     
     # Run with --help to verify imports and argparse
-    result = subprocess.run(['python', script_path, '--help'], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, script_path, '--help'], capture_output=True, text=True)
     
     assert result.returncode == 0
     assert 'usage: train.py' in result.stdout
