@@ -11,8 +11,20 @@ PROCESSED_DATA_DIR = 'data/processed'
 OUTPUT_FILE = os.path.join(PROCESSED_DATA_DIR, 'graph.pt')
 
 # Relations to build and degree cap (to prevent hub explosion)
-RELATION_COLS = ['card1', 'card2', 'addr1', 'addr2', 'P_emaildomain', 'DeviceInfo']
-DEGREE_CAP = 100  # Max number of edges any single node can get from one relation group
+# NOTE: 'addr2' was removed -- it only has 74 distinct values across 590,540
+# transactions (avg. group size ~175,000), meaning it groups transactions by
+# broad region/country rather than by any fraud-relevant shared entity. It
+# contributed ~52M low-information edges while adding little discriminative
+# signal, so it's excluded rather than capped.
+RELATION_COLS = ['card1', 'card2', 'addr1', 'P_emaildomain', 'DeviceInfo']
+
+# NOTE: DEGREE_CAP lowered from 100 to 20. At 100, capped/sampled groups for
+# high-cardinality-but-still-large relations (e.g. addr1, P_emaildomain)
+# pushed total edges to ~273M (~9GB graph.pt), which is impractical to
+# download/load/train on a single T4 GPU. 20 preserves meaningfully more
+# connectivity signal than a more aggressive cap (e.g. 10) while cutting
+# total edges from capped groups by ~5x compared to 100.
+DEGREE_CAP = 20  # Max number of edges any single node can get from one relation group
 RANDOM_SEED = 42  # For reproducible sampling when capping large groups
 
 def check_files(transaction_file, identity_file, raw_data_dir):
