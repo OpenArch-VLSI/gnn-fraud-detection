@@ -14,13 +14,56 @@ satisfied. Each phase's task list is your task list for that session. Obey every
 "Agent guardrails" note literally — they exist because of constraints the professor
 set, not stylistic preferences. If a request from the user conflicts with a
 guardrail (e.g. "just import GATConv to save time"), flag the conflict instead of
-silently complying or silently refusing.
+silently complying or silently refusing. One more constraint that isn't the
+professor's but is just as real: you don't have your own GPU. Every phase below
+that needs one runs on Kaggle, not in your local sandbox — see §0.1 for exactly
+where that line falls.
 
 > **Non-negotiable rule for Phase 7:** do not port or closely translate code from
 > the CARE-GNN or PC-GNN reference repositories. Read them, understand the
 > mechanism, then design your own variant. This is a graded, original-work
 > deliverable — copying a reference implementation defeats the point and risks
 > an academic integrity problem, not just a weak grade.
+
+## 0.1 Compute & tooling setup
+
+No local high-spec machine is available for this project. Every GPU-bound phase
+runs on Kaggle's free notebook tier, and the coding agent is Gemini 3.1 Pro (High
+thinking level) running inside Google's Antigravity IDE.
+
+- **Local vs. remote split (applies everywhere):** Antigravity/Gemini runs on
+  your machine (or wherever the IDE is hosted) and has no GPU of its own. It's
+  full-time help for writing code, designing the Phase 7 mechanism, debugging,
+  and drafting the report — but the actual execution of every GPU-bound phase
+  (3, 4, 5, 7, 8) happens on Kaggle, a separate environment it can only reach by
+  pushing code in (via `git clone` inside the notebook, or the `kaggle` CLI) and
+  pulling results back out, not by running things directly the way it would
+  against a local GPU.
+- **Debug locally first, always.** Because Antigravity cannot watch a Kaggle
+  run live or fix a crash mid-session, the default workflow for every
+  GPU-bound phase is: write and iterate against a small local CPU subsample
+  until the script is confirmed correct (runs cleanly, loss behaves, no shape
+  errors), *then* hand it off to Kaggle for the real run. Kaggle time is a
+  rationed resource — treat it as reserved for confirmed-stable code, not a
+  place to debug. If several small variants need testing (e.g. a few Phase 7
+  mechanism tweaks), queue them within one Kaggle session rather than starting
+  a fresh session per idea, since the quota is billed per hour, not per run.
+- **Thinking-level note:** run Gemini 3.1 Pro on "High" throughout — quota
+  resets every 5 hours, so there's no real cost to keeping the deeper
+  reasoning on for the whole project rather than switching levels per task.
+- **Phase 0** is built around Kaggle account/accelerator/quota setup and a
+  git-to-Kaggle sync method.
+- **Phase 1 / Phase 2** run on a CPU-only session (Kaggle or local) — no GPU
+  needed for EDA or graph construction, and CPU sessions don't draw down your
+  GPU quota.
+- **Phase 3:** assume Kaggle's free GPUs are meaningfully small (16GB VRAM,
+  ~29GB system RAM once a GPU is attached). Neighbor sampling is the likely
+  default, not a fallback you probably won't need.
+- **Phase 5, 7, 8:** include checkpoint/resume and GPU-hour budgeting
+  guardrails — a lost multi-hour run against a 30-hour weekly cap is expensive
+  to redo.
+- **Appendix E** includes risk-register rows for quota exhaustion, session
+  disconnects, and local/Kaggle environment drift.
 
 ---
 
@@ -33,27 +76,30 @@ mechanism that resists "camouflage" — fraud rings that deliberately connect
 themselves to normal accounts to look legitimate. This is the actively-studied gap
 in this field right now (see Appendix D).
 
-**Novelty, precisely stated (revised):** camouflage-resistant GNNs were
-originally built and tested on review-fraud graphs (Yelp/Amazon), but
-transaction-graph benchmarks for this exact problem already exist too
-(T-Finance, T-Social, S-FFSD — Appendix D), so "first to apply this to
-transaction data" is not an accurate or defensible claim — don't pitch it that
-way to your professor or in the report. What's still genuinely open on
-**IEEE-CIS specifically**: no prior work runs a CARE-GNN/PC-GNN-style explicit
-neighbor-filtering mechanism against from-scratch GraphSAGE/GAT baselines with a
-proper multi-seed ablation on this dataset, isolating how much of any gain
-comes from camouflage-resistance specifically versus attention alone. The
-closest existing work (Appendix D — RL-GNN, 2025) combines GAT with an RL
-controller directly on IEEE-CIS and reports 0.872 AUROC — a useful external
-number to benchmark against in Phase 8, and a paper you need to explicitly
-differentiate from in your report (it doesn't target camouflage/heterophily
-resistance specifically, and doesn't ablate against baselines you built
-yourself).
+**Novelty, precisely stated:** camouflage-resistant GNNs were originally built
+and tested on review-fraud graphs (Yelp/Amazon), but transaction-graph
+benchmarks for this exact problem already exist too (T-Finance, T-Social,
+S-FFSD — Appendix D), so "first to apply this to transaction data" is not an
+accurate or defensible claim — don't pitch it that way to your professor or in
+the report. What's still genuinely open on **IEEE-CIS specifically**: no prior
+work runs a CARE-GNN/PC-GNN-style explicit neighbor-filtering mechanism against
+from-scratch GraphSAGE/GAT baselines with a proper multi-seed ablation on this
+dataset, isolating how much of any gain comes from camouflage-resistance
+specifically versus attention alone. The closest existing work (Appendix D —
+RL-GNN, 2025) combines GAT with an RL controller directly on IEEE-CIS and
+reports 0.872 AUROC — a useful external number to benchmark against in Phase 8,
+and a paper you need to explicitly differentiate from in your report (it
+doesn't target camouflage/heterophily resistance specifically, and doesn't
+ablate against baselines you built yourself).
 
 ## 2. Top-level definition of done
 
 - [ ] From-scratch GraphSAGE and GAT baselines, trained and evaluated on a real
       fraud dataset, with imbalance-aware metrics (not accuracy)
+- [ ] A non-graph reference baseline, so "the graph helped" is a measured
+      result and not an assumption
+- [ ] At least one experiment testing robustness to *escalating* camouflage,
+      not just performance at the dataset's fixed, natural camouflage level
 - [ ] One clearly-scoped novel extension, implemented, ablated, and compared
       fairly against the baselines on identical splits/seeds
 - [ ] A codebase a stranger could clone and reproduce your headline number from
@@ -63,7 +109,12 @@ yourself).
 
 ## 3. Tech stack
 
-- Python 3.10+, PyTorch (CUDA build matching your GPU driver)
+- Python 3.10+, PyTorch. On Kaggle you don't pick a CUDA build yourself — the
+  notebook image ships a fixed PyTorch+CUDA pair. Check `torch.__version__`
+  first thing in Phase 0 and treat it as given; for local editing/unit-testing
+  with Antigravity (no GPU available there), install CPU-only PyTorch in a
+  small venv, same major version where possible, purely so tests and
+  small-sample debugging run instantly without touching Kaggle quota
 - Scatter/reduce ops: prefer **native PyTorch** (`torch.Tensor.scatter_reduce_`,
   `index_add_`) over the separate `torch_scatter` package. `torch_scatter`'s own
   maintainers note most of its functionality now lives in PyTorch directly, and
@@ -73,14 +124,23 @@ yourself).
   the spirit of Appendix C's "from scratch" scope — fall back to `torch_scatter`
   only if you hit a specific performance wall
 - PyTorch Geometric **only** for its `Data`/`Dataset` container and any dataset
-  download helpers (e.g. `EllipticBitcoinDataset`) — not for its `nn` layers
+  download helpers (e.g. `EllipticBitcoinDataset`) — not for its `nn` layers.
+  Install it with `!pip install torch_geometric` in your first Kaggle cell
+  each session and confirm it imports cleanly against the pre-installed
+  `torch` version before writing anything that depends on it — this is the
+  same CUDA/torch/PyG wheel-matching risk §3 already flags, just against
+  Kaggle's fixed image instead of your own driver
 - pandas / numpy / scikit-learn for tabular EDA and metrics
 - matplotlib for figures
+- `lightgbm` or `xgboost` (or plain `sklearn.linear_model` if you'd rather
+  avoid another dependency) for the Phase 5 tabular reference baseline
 
 ## 4. Repository structure
 
 ```
 fraud-gnn/
+  .github/
+    workflows/              # CI: run tests/ on every push (Phase 10)
   data/
     raw/                  # untouched downloads
     processed/             # serialized graph objects
@@ -88,12 +148,12 @@ fraud-gnn/
     data/                  # graph construction scripts
     models/
       layers/              # your from-scratch SAGEConv, GATConv
-      baselines.py
+      baselines.py          # GraphSAGE + GAT; also the non-graph tabular baseline
       camo_module.py       # your novel Part 2 piece
     train.py
     evaluate.py
     utils/
-  notebooks/                # EDA only — never production logic
+  notebooks/                # EDA, plus a thin Kaggle entry-point notebook (clones this repo, calls src/train.py) — never production logic itself
   experiments/               # one config + result log per run
   tests/                     # unit tests for your hand-written layers
   report/
@@ -103,29 +163,73 @@ fraud-gnn/
   ROADMAP.md                 # this file
 ```
 
+This repo lives on GitHub and is what Antigravity edits directly. Kaggle never
+edits it — a notebook only pulls it in (`!git clone`, or a token-authenticated
+pull for a private repo) at the start of a session, runs `src/train.py`, and
+its outputs get pulled back out (commit the notebook version, or push results
+to a Kaggle Dataset to persist beyond one session). Keep it one-directional:
+code changes always originate locally with Antigravity, never inside the
+Kaggle notebook itself, or the two copies will drift.
+
 ---
 
 ## Phase 0 — Environment & repo setup
 **~2–3 days**
 
-Goal: a reproducible environment and a scaffold, before any modeling.
+Goal: a reproducible environment and a scaffold, before any modeling. This spans
+two places — a local, GPU-less environment where Antigravity actually edits
+code, and Kaggle, where the code actually runs. Set both up and prove they talk
+to each other before Phase 1.
 
 Tasks
-- [ ] Create a conda/venv environment; install the PyTorch build matching your
-      CUDA version
-- [ ] `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_properties(0).total_memory)"` — confirm the GPU is visible
+
+*Local side (Antigravity's workspace):*
 - [ ] Initialize git; create the folder structure in §4
+- [ ] Create a lightweight local venv with **CPU-only** PyTorch — enough to run
+      unit tests and debug small-sample code with Antigravity without needing a
+      GPU or touching Kaggle quota
 - [ ] Write a `set_seed(seed)` utility used everywhere (Python, numpy, torch, cuda)
 - [ ] Stub `README.md` with the one-paragraph project summary
 
-Concepts to understand: why CUDA/driver mismatches happen; why seeding every RNG
-source (not just `torch.manual_seed`) matters for reproducible results.
+*Kaggle side (where every GPU-bound phase actually executes):*
+- [ ] Create a Kaggle account and complete phone verification — required
+      before GPU/TPU accelerators or internet access are unlocked in notebooks
+- [ ] Open a new Notebook; set Accelerator → GPU (P100's single 16GB device is
+      the simplest default; T4 x2 gives two separate 16GB GPUs, only useful if
+      you deliberately code for two devices) and Internet → On
+- [ ] In a cell: `import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_properties(0).total_memory)`
+      — confirm the GPU is visible; expect ~16GB, not 24GB
+- [ ] Decide and test your git-to-Kaggle sync method now, on a trivial script,
+      before Phase 1 needs it for real: `!git clone` your GitHub repo into the
+      notebook (use **Kaggle Secrets** for the token if it's private — do not
+      embed the token directly in the notebook cell, as notebook version history
+      will permanently leak it if the notebook is ever made public), or push/pull
+      via the `kaggle` CLI's `kernels push` / `kernels pull`. Confirm a full cycle
+      works — edit locally with Antigravity → sync to Kaggle → run → pull
+      results back — before you build anything on top of it
+- [ ] Check your current weekly GPU-hour and TPU-hour balance in Kaggle's
+      Settings, so Phase 1 onward starts from a known budget
+- [ ] Record the exact pre-installed `torch`/CUDA versions from the check above
+      in `requirements.txt`, so `pip install torch-geometric` later targets a
+      version that actually matches Kaggle's image, not a guess
 
-Agent guardrails: pin exact package versions in `requirements.txt` as you install
-them — don't let this drift silently later.
+Concepts to understand: why seeding every RNG source (not just
+`torch.manual_seed`) matters for reproducible results; why a
+`torch-geometric`/`torch_scatter` wheel has to match the *notebook's*
+pre-installed PyTorch+CUDA build rather than your own — you don't choose the
+CUDA driver, Kaggle does, so the mismatch risk is "your pip install vs.
+Kaggle's fixed image."
 
-Definition of Done: GPU check prints `True` and a plausible memory figure; repo
-pushed with the scaffold folders (empty is fine) committed.
+Agent guardrails: pin exact package versions in `requirements.txt` as you
+install them — don't let this drift silently later. Before kicking off any
+GPU session, say what's about to run and your best guess at how long, and get
+a go-ahead first — a burned session against a 30-hour weekly cap is more
+expensive to redo than a wrong line of code.
+
+Definition of Done: local unit-test environment runs (CPU only); a Kaggle
+notebook with GPU attached prints `True` and a ~16GB figure; your sync method
+reproduces a trivial edit-sync-run-pull cycle end-to-end; scaffold folders
+committed; current GPU/TPU quota balance checked.
 
 ---
 
@@ -143,8 +247,16 @@ Elliptic is already a graph (less construction work, less to learn there) and is
 reasonable fallback if graph construction eats too much of your timeline.
 
 Tasks
-- [ ] Download the chosen dataset (Kaggle for both; Elliptic also available via
-      `torch_geometric.datasets.EllipticBitcoinDataset`)
+- [ ] Attach the chosen dataset as a notebook input (Kaggle already hosts
+      both — search for the IEEE-CIS Fraud Detection competition or the
+      Elliptic Bitcoin dataset and "Add Input"; join the competition's rules
+      first if prompted, it's free) rather than downloading it anywhere
+      yourself; Elliptic is also available via
+      `torch_geometric.datasets.EllipticBitcoinDataset` if you'd rather fetch it
+      in code
+- [ ] Do this phase's EDA on a **CPU-only** Kaggle session (Accelerator → None)
+      — it doesn't need a GPU, and CPU sessions don't draw down your 30-hour
+      weekly GPU quota
 - [ ] EDA notebook: class balance, missing values, feature types; for IEEE-CIS
       specifically, check the cardinality of candidate "shared entity" columns
       (`card1`–`card6`, `addr1`, `addr2`, `P_emaildomain`, `R_emaildomain`,
@@ -198,13 +310,24 @@ can consume, run once, reused by every later phase.
 - [ ] Decide how to handle the ~77% of nodes with unknown labels: drop them, or
       keep them for a semi-supervised setup — pick one and justify it
 
+**Applies to either dataset:**
+- [ ] Write one explicit sentence in `README.md` stating whether your setup is
+      **transductive** (the full graph — including test-period nodes and edges
+      — is visible at train time, and only labels are split by time) or
+      **inductive** (test-period nodes are entirely absent from the graph
+      during training). Given the time-based split above, most straightforward
+      implementations end up transductive-with-temporal-label-masking, which is
+      a legitimate, standard choice — it just needs to be a choice a reader can
+      find stated plainly, not one they have to reverse-engineer from your code.
+
 Concepts to understand: `edge_index` vs. dense adjacency representation; why hub
 nodes distort message passing; transductive vs. inductive setting.
 
 Agent guardrails: every threshold or cap you pick (degree cap, which columns count
 as "shared entity") goes into a config value with a comment explaining the choice
 — not a magic number buried in code. This script must be re-runnable end-to-end
-from one command.
+from one command. Run this phase on a CPU-only session too — graph construction
+is data engineering, not model training, and doesn't need GPU quota.
 
 Definition of Done: `python src/data/build_graph.py` goes from raw file to saved
 graph object in one run, printing node count, edge count per relation, and class
@@ -219,12 +342,14 @@ Goal: hand-implement mean-aggregation message passing and a 2-layer SAGE model.
 
 Concepts to understand before coding:
 - Neighbor sampling, and why full-batch training doesn't scale to large graphs
-  in general — though at your actual hardware (24GB VRAM, 128GB RAM) full-batch
-  is likely feasible for both datasets at this scale (≤~600K nodes); PC-GNN's
-  own paper ran comparable-scale experiments on 128GB RAM with no GPU-memory
-  issues reported. Implement sampling anyway for the learning value and so your
-  pipeline generalizes, but don't let it block progress if full-batch trains
-  cleanly first
+  in general. Kaggle's free GPUs are a small box (single P100/T4, 16GB VRAM,
+  ~29GB system RAM once a GPU is attached), and PC-GNN's 128GB-RAM comparison
+  point is ~4.5x more RAM than you actually have. Full-batch may still work on
+  Elliptic (much smaller) but is genuinely uncertain on the full IEEE-CIS graph
+  depending on your feature width and hidden size. Implement neighbor sampling
+  for real — treat it as the likely default, profile full-batch memory on a
+  small subsample first, and only skip sampling if that profiling says you can
+  afford to
 - The update rule: new embedding for node *v* = `σ(W · CONCAT(h_v, AGG({h_u for u in neighbors(v)})))`
 - Why the "mean aggregator" is *not* the same as the GCN aggregator (different
   self-loop and normalization handling)
@@ -232,6 +357,11 @@ Concepts to understand before coding:
 Tasks
 - [ ] Implement a `SAGEConv` layer by hand using primitive tensor ops (see
       Appendix C for what "by hand" allows)
+- [ ] Decide explicitly what your mean aggregator does with a zero-degree node
+      (mean of an empty neighbor set is undefined) — a self-loop or a small
+      learned "isolated-node" fallback vector are the two standard fixes.
+      Double-check your Phase 2 degree caps don't quietly create zero-degree
+      nodes you haven't accounted for.
 - [ ] Stack two layers, add a binary classification head
 - [ ] Unit test on a tiny synthetic 5-node graph: check output shape, and that
       `loss.backward()` runs cleanly with nonzero gradients
@@ -257,6 +387,12 @@ concatenated together.
 
 Tasks
 - [ ] Implement `GATConv` by hand — single head first, then extend to multi-head
+- [ ] In your hand-written per-neighborhood softmax, subtract the max logit
+      before exponentiating (the standard numerically-stable softmax trick). A
+      naive `exp()` over raw, un-shifted attention logits is a common and
+      easy-to-miss source of silent NaNs once neighborhood-size variance gets
+      large near your Phase 2 degree-capped hub nodes. Apply the same
+      zero-degree fallback you used in Phase 3.
 - [ ] Unit test: attention weights sum to 1 across each node's neighborhood
 - [ ] Sanity-visualize attention weights on a handful of nodes — are they
       spread out and meaningful, or collapsing to near-uniform?
@@ -269,7 +405,7 @@ decreases, no NaNs).
 ---
 
 ## Phase 5 — Baseline training & evaluation harness
-**~4–5 days**
+**~4–5.5 days**
 
 Goal: a rigorous, reusable train/eval loop *before* touching the novel idea, so
 Phase 7 has a trustworthy number to beat.
@@ -283,17 +419,38 @@ Tasks
 - [ ] Config-driven `train.py --config configs/sage_baseline.yaml`, logging
       metrics every epoch
 - [ ] Run both baselines to convergence; save a results table
+- [ ] **Train one non-graph reference baseline** — LightGBM/XGBoost (or, as a
+      cheaper fallback, plain logistic regression) on the node feature matrix
+      alone, completely ignoring graph structure, with the same splits and
+      imbalance handling as above. This is the comparison that actually tells
+      you whether the graph is earning its added complexity — without it, you
+      can only ever compare GNN variants against each other and can never
+      answer "did the graph help at all?" It's also cheap relative to
+      everything else here (hours, not days, since you're not hand-coding it).
+      Don't be surprised if it's competitive: IEEE-CIS is a Kaggle dataset
+      where tree-based models have historically scored very well, and
+      GADBench-style benchmarks routinely include a tabular baseline for
+      exactly this reason. If it wins, that's still a real, honestly-reportable
+      finding — it reframes your report's contribution toward "here's
+      specifically where/why graph structure and camouflage-resistance help"
+      rather than "graphs beat tables," which is more defensible either way
 
 Concepts to understand: why accuracy misleads under this level of class
 imbalance (see Phase 1 for the exact per-dataset figures); early-stopping on
-PR-AUC rather than raw loss.
+PR-AUC rather than raw loss; why tree-based models are historically hard to
+beat on tabular fraud data, and what that does and doesn't tell you about
+whether relational structure matters.
 
 Agent guardrails: every run's config and metrics get logged under
 `experiments/<run-name>/` — nothing lives only in terminal output. Record the
-seed used for each run.
+seed used for each run. Also checkpoint model weights every few epochs (or
+every N minutes) and commit the notebook version well before your session hits
+the 12-hour wall — losing a multi-hour run to a timeout is the single most
+avoidable way to burn your weekly GPU quota. Log wall-clock time per run too;
+Phase 8's heavier sweep will need it.
 
 Definition of Done: a checked-in results table (model, PR-AUC, ROC-AUC, F1,
-recall) for both baselines.
+recall) for both from-scratch baselines **and the tabular reference baseline**.
 
 ---
 
@@ -327,8 +484,8 @@ Tasks
       — a simplified or modified selection rule, a different similarity measure,
       combining ideas from two papers, the specific from-scratch/ablation angle
       — anything specific and defensible. "Applying this to transaction data"
-      alone is *not* a valid answer anymore (see the revised novelty note in
-      §1) — be precise about what's actually new
+      alone is *not* a valid answer (see the novelty note in §1) — be precise
+      about what's actually new
 
 Agent guardrails: this phase produces prose notes, not code. If asked to
 "implement CARE-GNN," push back and confirm scope with the user first — Phase 7
@@ -354,8 +511,8 @@ specific combination you're running: an explicit, ablated neighbor-filtering
 mechanism, benchmarked against from-scratch GraphSAGE/GAT baselines you built
 yourself, on IEEE-CIS specifically, with a direct comparison point against the
 2025 GAT+RL result (Appendix D — RL-GNN). Carry this exact framing into your
-report's contribution statement — it's more precise than the original pitch and
-it holds up against a literature-aware reader.
+report's contribution statement — it's precise and it holds up against a
+literature-aware reader.
 
 Pick **one** of these starting mechanisms and adapt it — don't try to build all
 three:
@@ -370,8 +527,23 @@ three:
       neighbor embeddings together and pushes different-label pairs apart, making
       it structurally harder for a fraud node to hide inside a normal-looking
       neighborhood
+      *(Caveat: if you're on Elliptic, remember 77% of nodes are unlabeled —
+      this mechanism needs same/different-label neighbor pairs to form its
+      contrastive terms, so your usable pool of pairs shrinks a lot on this
+      dataset specifically. Not a blocker if you pick this option and Elliptic,
+      just budget for it.)*
 
 Tasks
+- [ ] **Build this in two passes to de-risk the phase:**
+  - [ ] **V0 — fixed-heuristic version**: implement your chosen mechanism with
+        a hand-set threshold/rule instead of a learned one. Fast to build, and
+        gives you a real, working comparison point within days, not weeks.
+  - [ ] **V1 — learned version**: replace the fixed threshold/rule with the
+        learned mechanism as scoped above.
+  - [ ] If V1 has convergence trouble late in the timeline, V0 is still a
+        legitimate, reportable data point for Phase 8 — a documented "the
+        learned version didn't converge in time, here are the heuristic
+        version's numbers instead" beats having nothing to show.
 - [ ] Implement the chosen mechanism as a module wrapping/extending your Phase 4
       GAT
 - [ ] Get it training end-to-end on a small subsample first for fast iteration,
@@ -379,7 +551,10 @@ Tasks
 - [ ] Compare against the Phase 5 baseline numbers on the **same split and seed**
 
 Agent guardrails: keep the mechanism swappable behind a config flag so Phase 8's
-ablations are config changes, not code forks.
+ablations are config changes, not code forks. This is the most iteration-heavy
+phase in the whole project — do all correctness debugging on the local
+subsample, and only move to Kaggle once a version is confirmed stable. Never
+treat a Kaggle session as the place to iterate on a new idea.
 
 Definition of Done: trains stably; is at least directionally comparable to the
 baseline on PR-AUC. If it's worse, that is still a valid, reportable result as
@@ -397,6 +572,11 @@ Tasks
 - [ ] Main comparison table: GraphSAGE, GAT, GAT + your module
 - [ ] Ablation: your module with each key component removed, one at a time
 - [ ] Run 3 random seeds per config; report mean ± std, never a single run
+- [ ] Report the per-seed values in an appendix table too, not just mean ± std
+      — with only 3 seeds, an honest reader will want to see whether your
+      module wins in all 3 individually or only on average. If the margin over
+      baseline is small, say so plainly in the report rather than letting the
+      mean imply more consistency than 3 runs can support
 - [ ] **If using IEEE-CIS:** note RL-GNN's published 0.872 AUROC / 0.683 AP
       (Appendix D) alongside your table as an external reference point — not a
       strict apples-to-apples comparison (different splits/preprocessing almost
@@ -407,12 +587,30 @@ Tasks
       distribution shift alone explains a meaningful chunk of apparent GNN gains
       on Elliptic — worth checking honestly rather than assuming the graph
       structure is doing all the work.
+- [ ] **Synthetic camouflage stress test.** Take your held-out known-fraud test
+      nodes and synthetically add extra edges from a subset of them to random
+      benign nodes, in steps (e.g. +0, +5, +10, +20 edges per fraud node), then
+      re-run inference at each step — no retraining needed — and plot PR-AUC
+      (or mean fraud-score for that subset) against injection level, one line
+      per model (GraphSAGE, GAT, GAT + your module). This is the experiment
+      that actually tests the *"camouflage-resistant"* claim in the project
+      title: everything else here measures performance at the one, fixed
+      camouflage level fraudsters already baked into the dataset, but never
+      checks whether your mechanism holds up as camouflage gets *worse*. It's
+      cheap (no retraining, just edge injection + forward passes at eval time),
+      and a curve where your module degrades more slowly than the baselines is
+      a substantially stronger headline result than a single-point PR-AUC delta.
 
 Agent guardrails: never hand-pick the best-looking seed as the headline number —
-report the aggregate across seeds.
+report the aggregate across seeds. Before launching the full ablation × seed ×
+stress-test grid, multiply it out against the per-run time you logged in
+Phase 5/7 — if the total clears one week's 30 GPU-hours, trim the grid (fewer
+seeds, fewer injection steps) up front rather than discovering the shortfall
+mid-week.
 
 Definition of Done: results table plus 1–2 figures (a PR curve, or an ablation
-bar chart) saved to `report/figures/`.
+bar chart) **and the camouflage-degradation curve from the stress test above**
+saved to `report/figures/`.
 
 ---
 
@@ -424,6 +622,13 @@ Goal: a qualitative story for your report/defense — *why* it works, not just
 
 Tasks
 - [ ] Find cases the baseline got wrong that your module fixed, and vice versa
+- [ ] **If using IEEE-CIS**, slice the "baseline got wrong, module fixed" cases
+      by `TransactionAmt` (e.g. top vs. bottom quartile) to check whether your
+      module's gains concentrate on high-value camouflaged fraud specifically.
+      A finding like "this mostly catches large, well-disguised transactions
+      the baseline missed" is a much stronger qualitative story for your
+      report/defense than an aggregate PR-AUC delta — and if the gains are
+      spread evenly instead, that's a fine, honest thing to report too
 - [ ] Inspect attention weights on a handful of known-fraud nodes, before vs.
       after your module
 - [ ] Optional: a simple explanation output — e.g. the top-k neighbors or
@@ -444,6 +649,14 @@ Tasks
       `requirements.txt`, dead notebooks/code removed
 - [ ] **Confirm a fresh clone + fresh environment reproduces your headline
       number.** This is the single most common thing that quietly breaks.
+- [ ] Add a minimal CI workflow (`.github/workflows/test.yml`) that runs your
+      Phase 3/4/7 unit tests on every push — a dozen lines of YAML (checkout,
+      set up Python, `pip install -r requirements.txt`, `pytest tests/`). This
+      turns your own top-level Definition of Done ("a codebase a stranger
+      could clone and reproduce your headline number from") from a one-time
+      manual check at the end into something enforced from the day you write
+      your first unit test in Phase 3 — and it's a concrete thing to point to
+      if your professor asks about engineering rigor
 - [ ] Prepare a short talking-point summary for professor discussion — e.g.
       *"Normal fraud-detection AI gets fooled when criminals deliberately make
       themselves look normal — my project builds one that's harder to fool."*
@@ -483,6 +696,17 @@ if your novel mechanism needs more iteration.
 | 10 | 9 | Error analysis examples collected |
 | 11–12 | 10 | Report written, repro check passed, submission packaged |
 
+*The tabular baseline (Phase 5), the stress-test ablation (Phase 8), and the CI
+workflow (Phase 10) are each on the order of a few hours, not days — they
+should fit inside the existing per-phase estimates above without pushing the
+12-week total.*
+
+*The week estimates above are wall-clock, not GPU-hours — but Phases 3, 4, 5,
+7, and 8 are exactly the ones drawing on your 30 GPU-hr/week quota. If a phase
+needs more GPU time than a week gives you, it spills into next week's
+allowance; plan Phases 7–8 especially with this in mind rather than assuming a
+week's estimate and a week's quota line up on their own.*
+
 ## Appendix C — "From scratch" scope clarification
 
 **Allowed:** `torch.nn.Linear`, autograd, optimizers, `torch.sparse`, raw tensor
@@ -518,29 +742,57 @@ slightly ambiguous about utility functions like this.
 finalizing your novelty paragraph, they directly constrain what you can claim:**
 - T-Finance / T-Social — Tang et al., *Rethinking Graph Neural Networks for
   Anomaly Detection*, ICML 2022 — transaction/account-graph fraud benchmarks;
-  establishes that "transaction data" alone is not the open gap
+  establishes that "transaction data" alone is not the open gap. Introduces
+  BWGNN plus the T-Finance/T-Social datasets.
 - S-FFSD — Xiang et al., *Semi-supervised Credit Card Fraud Detection via
   Attribute-driven Graph Representation*, AAAI 2023 — simulated credit-card
-  transaction graph, same purpose as T-Finance
+  transaction graph, same purpose as T-Finance. The original paper calls the
+  dataset FFSD; "S-FFSD" is the name commonly used for the publicly-released
+  version in follow-up work.
 - **RL-GNN** — *Reinforcement learning with graph neural network (RL-GNN)
   fusion for real-time financial fraud detection*, Scientific Reports, Dec
   2025 — GAT + RL controller evaluated directly on IEEE-CIS, 0.872 AUROC /
   0.683 AP. The closest existing work to Phase 7 — required reading (Phase 6),
-  and the paper you need to explicitly differentiate from in your report
+  and the paper you need to explicitly differentiate from in your report.
+  Devi, Raja & Chin, *Sci Rep* 15, 42953 (2025),
+  DOI 10.1038/s41598-025-25200-3.
+- **Naming heads-up:** don't confuse RL-GNN above with a second, similarly-named
+  2025 paper, *FraudGNN-RL* (Cui et al., IEEE Open Journal of the Computer
+  Society, 2025, DOI 10.1109/OJCS.2025.3543450). It's also a GNN+RL fraud
+  framework but a genuinely different method (a Temporal-Spatial-Semantic
+  Graph Convolution architecture with a DQN that adjusts thresholds),
+  evaluated separately. Easy to conflate the two in a lit review — worth a
+  one-line disambiguation in your report if you cite either.
 - GADBench — benchmark paper standardizing evaluation of CARE-GNN, PC-GNN, and
   related methods; useful for baseline-comparison methodology
 
 **Recent camouflage-specific work (2025) — for currency in your related-work
 section:**
-- PROD — *Projected and Orthogonal Disentanglement*, Knowledge-Based Systems,
-  2025 — tackles scarce labeled data and camouflage jointly via risk-aware
-  encoding and disentanglement
+- PROD — *Projected and Orthogonal Disentanglement*, Knowledge-Based Systems —
+  tackles scarce labeled data and camouflage jointly via risk-aware encoding
+  and disentanglement. The publisher lists this in Volume 343 (2026), not
+  2025 — likely an online-first-vs-print-volume gap; cite the DOI rather than
+  a year if a reference manager pushes back.
 - SCFCRC — *Simultaneously Counteract Feature Camouflage and Relation
   Camouflage for Fraud Detection*, arXiv 2025 — directly targets both
-  camouflage types together, same framing as your Phase 7 problem statement
-- HA-GNN (2025 update) — argues CARE-GNN-style neighbor selectors handle
-  relation camouflage well but degrade when feature camouflage is layered on
-  top too — a legitimate, citable limitation of the baseline you're extending
+  camouflage types together via a Feature Camouflage Filter and a Relation
+  Camouflage Refiner, same framing as your Phase 7 problem statement.
+  arXiv:2501.12430, Zhang, Ye, Zhao, Wang & Su.
+- The underlying critique that per-relation neighbor selectors handle relation
+  camouflage well but degrade once feature camouflage is layered on top too is
+  real and current — it's SCFCRC (above) that makes this exact argument
+  explicitly and recently. HA-GNN (arXiv:2202.06096, *Improving Fraud
+  Detection via Hierarchical Attention-based Graph Neural Network*) covers
+  related ground but is a 2022 paper — cite it with that date if you use it,
+  and prefer SCFCRC for the 2025-current framing of this specific point.
+- **GNN-LAARA** — *Fraud detection based on GNNs with local augmentation and
+  adaptive relation aggregation*, Expert Systems with Applications, Oct
+  2025 — combines CVAE-based feature enhancement, DDPG (RL)-based adaptive
+  neighbor selection, and multi-relational attention to counter feature and
+  relation camouflage together. Closely adjacent to both your Phase 7
+  mechanism menu and the RL-GNN reading above — worth a skim, and a good third
+  data point alongside RL-GNN and SCFCRC for your "here's exactly how mine
+  differs" paragraph
 
 **Datasets:**
 - IEEE-CIS Fraud Detection dataset — Kaggle
@@ -555,4 +807,9 @@ section:**
 | Hub-node explosion makes the graph unusable | Medium–High (IEEE-CIS) | Degree caps from Phase 2, checked immediately after construction, not discovered mid-training |
 | Running out of time for the report | High if left until the end | Start the related-work section in Phase 6, not Phase 10 |
 | "From scratch" scope dispute with professor | Low, but costly if it happens | Confirm Appendix C's line with them in week 1 |
-| Novelty claim challenged as "already done" (T-Finance/S-FFSD/RL-GNN exist) | Was High, now mitigated | Precise novelty statement in §1 and Phase 7 (this revision); RL-GNN added as required reading in Phase 6 so the differentiation paragraph is specific, not naive |
+| Novelty claim challenged as "already done" (T-Finance/S-FFSD/RL-GNN exist) | Low, with mitigation in place | Precise novelty statement in §1 and Phase 7; RL-GNN is required reading in Phase 6 so the differentiation paragraph is specific, not naive |
+| Tabular baseline (Phase 5) matches or beats every graph model | Medium | Still a valid, honestly-reportable finding — reframe the report's contribution around *when/why* graph structure and camouflage-resistance help rather than *whether* graphs beat tables; the Phase 8 camouflage-specific ablations stay meaningful either way |
+| Synthetic camouflage injection (Phase 8) doesn't move any model's score | Medium | Also a valid, reportable result — but first check the injection isn't so large it saturates every model's neighborhood indiscriminately; sweep several injection levels before concluding the mechanism doesn't matter |
+| Weekly GPU quota (30h) or 12h session cap runs out mid-phase | High during Phases 7–8 | Checkpoint/resume every run (Phase 0); do EDA, graph construction, and unit-testing on CPU-only sessions, which don't draw down GPU quota; budget Phase 8's full sweep against the weekly cap before launching it |
+| Kaggle session disconnects or idles out, losing an unsaved run | Medium | Same checkpoint/resume discipline as above; commit ("Save Version") after every meaningful run rather than relying on an interactive session's live state |
+| Locally-authored code (Antigravity) behaves differently on Kaggle's pre-built image (library version drift) | Medium | Pin versions in `requirements.txt` against what Kaggle's image actually has (Phase 0); run a trivial push-run-pull dry cycle before Phase 1 rather than discovering mismatches under time pressure |
