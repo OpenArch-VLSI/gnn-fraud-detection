@@ -58,7 +58,7 @@ def build_graph(transaction_file, identity_file, limit=None):
     print("Processing node features...")
     # Very basic feature processing (impute NaNs, encode categoricals, scale)
     # Exclude IDs, target, and relation columns from node features
-    exclude_cols = ['TransactionID', 'isFraud', 'TransactionDT'] + RELATION_COLS
+    exclude_cols = ['TransactionID', 'isFraud', 'TransactionDT', 'addr2'] + RELATION_COLS
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     features_df = df[feature_cols].copy()
