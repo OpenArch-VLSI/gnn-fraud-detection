@@ -12,7 +12,8 @@ OUTPUT_FILE = os.path.join(PROCESSED_DATA_DIR, 'graph.pt')
 
 # Relations to build and degree cap (to prevent hub explosion)
 RELATION_COLS = ['card1', 'card2', 'addr1', 'addr2', 'P_emaildomain', 'DeviceInfo']
-DEGREE_CAP = 100  # If an entity appears more than 100 times, do not build edges between all its transactions
+DEGREE_CAP = 100  # Max number of edges any single node can get from one relation group
+RANDOM_SEED = 42  # For reproducible sampling when capping large groups
 
 def check_files(transaction_file, identity_file, raw_data_dir):
     if not os.path.exists(transaction_file) or not os.path.exists(identity_file):
@@ -24,19 +25,18 @@ def check_files(transaction_file, identity_file, raw_data_dir):
 
 def build_graph(transaction_file, identity_file, limit=None):
     print("Loading data...")
-    # Read data (limiting rows for initial testing can be done here if needed)
+    # Read data
+    df_trans = pd.read_csv(transaction_file)
+    df_id = pd.read_csv(identity_file)
+    
+    # Sort transactions by time to allow time-based split
+    df_trans = df_trans.sort_values('TransactionDT').reset_index(drop=True)
+    
     if limit is not None:
-        df_trans = pd.read_csv(transaction_file, nrows=limit)
-        df_id = pd.read_csv(identity_file, nrows=limit)
-    else:
-        df_trans = pd.read_csv(transaction_file)
-        df_id = pd.read_csv(identity_file)
+        df_trans = df_trans.head(limit)
     
     # Merge on TransactionID
     df = df_trans.merge(df_id, on='TransactionID', how='left')
-    
-    # Sort by time to allow time-based split
-    df = df.sort_values('TransactionDT').reset_index(drop=True)
     
     print(f"Total transactions: {len(df)}")
     
@@ -75,6 +75,7 @@ def build_graph(transaction_file, identity_file, limit=None):
     
     print("Building edges...")
     edge_indices = {}
+    rng = np.random.default_rng(RANDOM_SEED)
     
     for col in RELATION_COLS:
         if col not in df.columns:
@@ -88,25 +89,53 @@ def build_graph(transaction_file, identity_file, limit=None):
         # Group by the entity value
         grouped = valid_nodes.groupby(col)['node_idx'].apply(list)
         
-        # Filter out groups that exceed DEGREE_CAP to avoid hub explosion
-        grouped = grouped[grouped.apply(len) <= DEGREE_CAP]
-        grouped = grouped[grouped.apply(len) > 1] # Need at least 2 nodes to make an edge
+        # Need at least 2 nodes to make an edge
+        grouped = grouped[grouped.apply(len) > 1]
         
-        # Build edges (fully connected within each group)
+        # Build edges. Small groups (<= DEGREE_CAP) are fully connected.
+        # Large groups (> DEGREE_CAP) are NOT dropped anymore -- instead,
+        # each node in the group is connected to a random sample of up to
+        # DEGREE_CAP other members, so popular entities (e.g. a widely-used
+        # card or common email domain) still contribute edges without
+        # creating an all-pairs "hub explosion" (which for a group of size
+        # N would otherwise create N*(N-1) edges).
         src = []
         dst = []
+        num_capped_groups = 0
+        num_full_groups = 0
+        
         for indices in grouped:
-            for i in indices:
-                for j in indices:
-                    if i != j:
+            group_size = len(indices)
+            
+            if group_size <= DEGREE_CAP:
+                # Small enough: fully connect every pair, as before
+                num_full_groups += 1
+                for i in indices:
+                    for j in indices:
+                        if i != j:
+                            src.append(i)
+                            dst.append(j)
+            else:
+                # Large group: cap each node's edges via random sampling
+                # instead of discarding the group entirely
+                num_capped_groups += 1
+                indices_arr = np.array(indices)
+                for i in indices_arr:
+                    # Sample up to DEGREE_CAP other members (excluding i itself)
+                    others = indices_arr[indices_arr != i]
+                    sample_size = min(DEGREE_CAP, len(others))
+                    sampled = rng.choice(others, size=sample_size, replace=False)
+                    for j in sampled:
                         src.append(i)
-                        dst.append(j)
-                        
+                        dst.append(int(j))
+        
         if len(src) > 0:
             edge_indices[col] = torch.tensor([src, dst], dtype=torch.long)
-            print(f"    Created {len(src)} edges for {col}")
+            print(f"    Created {len(src)} edges for {col} "
+                  f"({num_full_groups} fully-connected groups, "
+                  f"{num_capped_groups} capped/sampled groups)")
         else:
-            print(f"    No edges created for {col} (all groups exceeded cap or were size 1)")
+            print(f"    No edges created for {col} (no groups of size > 1)")
     
     # Create single combined edge_index for basic GraphSAGE/GAT
     # (Advanced model in Phase 7 might use the separate relations)
