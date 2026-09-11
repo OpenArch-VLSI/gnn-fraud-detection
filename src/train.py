@@ -64,7 +64,13 @@ def main():
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Graph data not found at {data_path}. Run build_graph.py first.")
     
-    data = torch.load(data_path, weights_only=False).to(device)
+    # NOTE: Keep `data` on CPU here. NeighborLoader samples mini-batches from
+    # this object on the fly; moving the *entire* graph (45.5M edges + 590K
+    # feature rows) to GPU up front defeats the purpose of mini-batch/
+    # neighbor-sampled training and risks OOM on a T4. Only the sampled
+    # `batch` (already moved to `device` inside the train/val loops below)
+    # needs to live on GPU.
+    data = torch.load(data_path, weights_only=False)
     print(f"Loaded graph with {data.num_nodes} nodes and {data.edge_index.size(1)} edges.")
 
     in_channels = data.x.size(1)
@@ -87,6 +93,17 @@ def main():
     num_neg = len(train_labels) - num_pos
     pos_weight = torch.tensor([num_neg / (num_pos + 1e-6)], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    # For the camouflage-resistant model only: an auxiliary BCE loss trains
+    # each CamouflageGATConv layer's internal `score_head` to predict true
+    # fraud labels. Without this, the label-aware trust signal the layer
+    # relies on (see camouflage_gat.py) would be computed from an untrained,
+    # meaningless score head -- this is what actually makes it label-aware
+    # rather than just an unsupervised, arbitrarily-initialized detour.
+    # Weighted low relative to the main loss since it's a supporting signal,
+    # not the primary training objective.
+    aux_loss_weight = config.get('aux_loss_weight', 0.3)
+    is_camouflage_model = (config['model'] == 'camouflage')
 
     print("Setting up data loaders...")
     if os.environ.get('EVAL_PLUMBING_TEST') == '1':
@@ -130,6 +147,18 @@ def main():
             optimizer.zero_grad()
             out = model(batch.x, batch.edge_index).squeeze(-1)
             loss = criterion(out[:batch.batch_size], batch.y[:batch.batch_size].float())
+
+            if is_camouflage_model:
+                # Supervise the camouflage layers' internal fraud-score
+                # heads with the SAME batch's true labels, over ALL sampled
+                # nodes in this batch (not just the seed nodes), since the
+                # score head's job is to inform neighbor trust for every
+                # node that participates in message passing, not just the
+                # ones being scored for the final prediction.
+                node_scores = model.auxiliary_node_scores()
+                aux_loss = criterion(node_scores, batch.y.float())
+                loss = loss + aux_loss_weight * aux_loss
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
