@@ -239,41 +239,33 @@ committed; current GPU/TPU quota balance checked.
 Goal: lock the dataset and write down precisely what you're building, before
 writing model code.
 
-**Decision point — IEEE-CIS vs. Elliptic** (full comparison in Appendix A).
-Default recommendation: **IEEE-CIS**, because constructing the multi-relation
-graph yourself is real learning *and* sets up the camouflage angle in Phase 7
-naturally — a fraud ring sharing a device or card is a direct camouflage signal.
-Elliptic is already a graph (less construction work, less to learn there) and is a
-reasonable fallback if graph construction eats too much of your timeline.
+**Dataset: IEEE-CIS** (full comparison against the Elliptic Bitcoin
+alternative that was considered and passed over is in Appendix A). IEEE-CIS
+was chosen because constructing the multi-relation graph yourself is real
+learning *and* sets up the camouflage angle in Phase 7 naturally — a fraud
+ring sharing a device or card is a direct camouflage signal.
 
 Tasks
-- [ ] Attach the chosen dataset as a notebook input (Kaggle already hosts
-      both — search for the IEEE-CIS Fraud Detection competition or the
-      Elliptic Bitcoin dataset and "Add Input"; join the competition's rules
-      first if prompted, it's free) rather than downloading it anywhere
-      yourself; Elliptic is also available via
-      `torch_geometric.datasets.EllipticBitcoinDataset` if you'd rather fetch it
-      in code
+- [x] Attach the dataset as a notebook input: the official **"IEEE-CIS Fraud
+      Detection"** Kaggle competition (join the competition's rules first if
+      prompted, it's free) rather than downloading it anywhere yourself or
+      using a third-party reupload
 - [ ] Do this phase's EDA on a **CPU-only** Kaggle session (Accelerator → None)
       — it doesn't need a GPU, and CPU sessions don't draw down your 30-hour
       weekly GPU quota
-- [ ] EDA notebook: class balance, missing values, feature types; for IEEE-CIS
-      specifically, check the cardinality of candidate "shared entity" columns
-      (`card1`–`card6`, `addr1`, `addr2`, `P_emaildomain`, `R_emaildomain`,
-      `DeviceInfo`)
+- [ ] EDA notebook: class balance, missing values, feature types; check the
+      cardinality of candidate "shared entity" columns (`card1`–`card6`,
+      `addr1`, `addr2`, `P_emaildomain`, `R_emaildomain`, `DeviceInfo`) — this
+      is what the Phase 2 relation-column decision below is based on
 - [ ] Write a one-paragraph problem statement and a one-paragraph novelty
       statement — this becomes tomorrow's pitch to your professor and later the
       intro of your report
 
 Concepts to understand: why accuracy is a bad headline metric under class
-imbalance — concretely, a model that always predicts "not fraud" already scores
-~96.5% on IEEE-CIS (20,663 fraud / 590,540 total) and ~90.2% on Elliptic *if
-evaluated on labeled nodes only* (4,545 illicit / 46,564 labeled — the higher
-97%+ figure sometimes quoted only holds if you count the unlabeled 77% as
-implicit negatives, which isn't standard practice and won't match how you'll
-actually evaluate in Phase 5); why a **random** train/test split can leak
-information in transaction data (better: time-based split, especially for
-Elliptic's 49 timesteps).
+imbalance — concretely, a model that always predicts "not fraud" already
+scores ~96.5% on IEEE-CIS (20,663 fraud / 590,540 total); why a **random**
+train/test split can leak information in transaction data (better: a
+time-based split).
 
 Agent guardrails: this phase is analysis only — no training yet.
 
@@ -288,37 +280,41 @@ dataset choice locked in `README.md`.
 Goal: a deterministic script that turns raw data into a graph object your models
 can consume, run once, reused by every later phase.
 
-**If IEEE-CIS:**
-- [ ] Decide node scope: transactions as the only node type (simplest — shared
-      entities become *relation types*, i.e. edges), vs. a fully heterogeneous
-      graph with separate card/device/email nodes. Pick one and write down why —
-      this is a real design decision, not busywork.
-- [ ] Build one edge relation per shared-entity type (same card1+card2 → edge;
-      same DeviceInfo → edge; same email domain → edge). This mirrors CARE-GNN's
-      multi-relation design (it used relations like same-user / same-time /
-      same-star on review data) — you're doing the same idea on transaction data.
-- [ ] **Cap degree on hub entities.** A shared value like `gmail.com` will connect
-      a huge fraction of all transactions if you don't cap it — this is a known,
-      easy-to-miss gotcha that silently turns your graph into a near-clique.
-- [ ] Serialize: per-relation `edge_index` tensors, node feature matrix, label
-      vector, train/val/test masks → disk, so nothing downstream re-parses raw CSVs.
-
-**If Elliptic:**
-- [ ] Load the provided node features / edges / labels directly
-- [ ] Build a **time-based** split (paper convention: train on early timesteps,
-      test on later ones — e.g. steps 1–34 train, 35–49 test) — not a random split
-- [ ] Decide how to handle the ~77% of nodes with unknown labels: drop them, or
-      keep them for a semi-supervised setup — pick one and justify it
-
-**Applies to either dataset:**
-- [ ] Write one explicit sentence in `README.md` stating whether your setup is
-      **transductive** (the full graph — including test-period nodes and edges
-      — is visible at train time, and only labels are split by time) or
-      **inductive** (test-period nodes are entirely absent from the graph
-      during training). Given the time-based split above, most straightforward
-      implementations end up transductive-with-temporal-label-masking, which is
-      a legitimate, standard choice — it just needs to be a choice a reader can
-      find stated plainly, not one they have to reverse-engineer from your code.
+- [x] Node scope decided: **transactions as the only node type** (the
+      simpler option) — shared entities (card, device, email) become
+      *relation types*, i.e. edges, rather than their own separate node
+      types in a fully heterogeneous graph.
+- [x] Build one edge relation per shared-entity type. **Final relation
+      columns: `card1`, `card2`, `addr1`, `P_emaildomain`, `DeviceInfo`.**
+      This mirrors CARE-GNN's multi-relation design (it used relations like
+      same-user / same-time / same-star on review data) — the same idea
+      applied to transaction data. `addr2` was evaluated and **deliberately
+      excluded** from both edges and node features: it has one dominant
+      value and an extremely large average group size (~175K), making it
+      low-signal and prone to the same hub-node problem described below if
+      used as an edge relation.
+- [x] **Cap degree on hub entities.** A shared value like a common email
+      domain would otherwise connect a huge fraction of all transactions —
+      this silently turns the graph into a near-clique. **`DEGREE_CAP = 20`**
+      (an explicit, commented config constant in `build_graph.py`): groups of
+      size ≤ 20 are fully connected; larger groups have each node randomly
+      sample up to 20 other group members rather than being fully connected
+      or dropped entirely. (`DEGREE_CAP` was originally tried at 100, which
+      produced an impractical ~273M edges / ~9GB graph file; 20 cuts
+      capped-group edge volume by roughly 5x while still preserving the
+      relation signal.)
+- [x] Serialize: combined `edge_index` tensor (all five relations merged),
+      node feature matrix, label vector → `data/processed/graph.pt`, so
+      nothing downstream re-parses raw CSVs. **Verified output: 590,540
+      nodes, 425 features, 45,528,526 total combined edges**
+      (card1: 11,200,772; card2: 11,631,988; addr1: 10,486,078;
+      P_emaildomain: 9,921,680; DeviceInfo: 2,288,008).
+- [ ] Write one explicit sentence in `README.md` stating whether the setup is
+      **transductive** (the full graph is visible at train time, and only
+      labels are split) or **inductive** (test-period nodes are entirely
+      absent from the graph during training) — this hasn't been written down
+      explicitly yet and should be, so a reader doesn't have to
+      reverse-engineer it from the code.
 
 Concepts to understand: `edge_index` vs. dense adjacency representation; why hub
 nodes distort message passing; transductive vs. inductive setting.
@@ -342,33 +338,37 @@ Goal: hand-implement mean-aggregation message passing and a 2-layer SAGE model.
 
 Concepts to understand before coding:
 - Neighbor sampling, and why full-batch training doesn't scale to large graphs
-  in general. Kaggle's free GPUs are a small box (single P100/T4, 16GB VRAM,
-  ~29GB system RAM once a GPU is attached), and PC-GNN's 128GB-RAM comparison
-  point is ~4.5x more RAM than you actually have. Full-batch may still work on
-  Elliptic (much smaller) but is genuinely uncertain on the full IEEE-CIS graph
-  depending on your feature width and hidden size. Implement neighbor sampling
-  for real — treat it as the likely default, profile full-batch memory on a
-  small subsample first, and only skip sampling if that profiling says you can
-  afford to
+  in general. Kaggle's free GPUs are a small box (16GB VRAM, ~29GB system RAM
+  once a GPU is attached), and PC-GNN's 128GB-RAM comparison point is ~4.5x
+  more RAM than you actually have. With ~590K nodes and ~45.5M edges,
+  full-batch training on the whole IEEE-CIS graph is not viable on this
+  hardware — neighbor sampling (via `NeighborLoader`, see Phase 5) is the
+  actual approach used, not just a likely default
 - The update rule: new embedding for node *v* = `σ(W · CONCAT(h_v, AGG({h_u for u in neighbors(v)})))`
 - Why the "mean aggregator" is *not* the same as the GCN aggregator (different
   self-loop and normalization handling)
 
 Tasks
-- [ ] Implement a `SAGEConv` layer by hand using primitive tensor ops (see
+- [x] Implement a `SAGEConv` layer by hand using primitive tensor ops (see
       Appendix C for what "by hand" allows)
 - [ ] Decide explicitly what your mean aggregator does with a zero-degree node
       (mean of an empty neighbor set is undefined) — a self-loop or a small
       learned "isolated-node" fallback vector are the two standard fixes.
       Double-check your Phase 2 degree caps don't quietly create zero-degree
       nodes you haven't accounted for.
-- [ ] Stack two layers, add a binary classification head
-- [ ] Unit test on a tiny synthetic 5-node graph: check output shape, and that
-      `loss.backward()` runs cleanly with nonzero gradients
+- [x] Stack two layers (`sage.py`, with BatchNorm + ReLU + dropout), add a
+      binary classification head (single-logit output)
+- [x] Unit tests exist and pass (9/9 in the current suite), covering the
+      hand-written layers' shapes and gradient flow
 
 Agent guardrails: **do not** import `torch_geometric.nn.SAGEConv`,
 `dgl.nn.SAGEConv`, or any prebuilt message-passing layer. Comment each line of
-the layer with which part of the formula above it implements.
+the layer with which part of the formula above it implements. **Keep this
+layer as the single canonical `SAGEConv` in the repo** — at one point two
+independently-written versions (from different contributors) existed side by
+side, which risks shape mismatches and checkpoints that don't correspond to
+the code loading them; resolve any future duplication immediately rather than
+letting two versions drift.
 
 Definition of Done: unit tests pass; trains without NaN loss on a small
 subsample within a few minutes.
@@ -386,18 +386,17 @@ neighborhood; multi-head attention as several independent attention computations
 concatenated together.
 
 Tasks
-- [ ] Implement `GATConv` by hand — single head first, then extend to multi-head
-- [ ] In your hand-written per-neighborhood softmax, subtract the max logit
-      before exponentiating (the standard numerically-stable softmax trick). A
-      naive `exp()` over raw, un-shifted attention logits is a common and
-      easy-to-miss source of silent NaNs once neighborhood-size variance gets
-      large near your Phase 2 degree-capped hub nodes. Apply the same
-      zero-degree fallback you used in Phase 3.
-- [ ] Unit test: attention weights sum to 1 across each node's neighborhood
-- [ ] Sanity-visualize attention weights on a handful of nodes — are they
-      spread out and meaningful, or collapsing to near-uniform?
+- [x] Implement `GATConv` by hand, with multi-head attention and explicit
+      self-loops (so a node's own features always contribute to its own
+      update)
+- [x] In the hand-written per-neighborhood softmax, subtract the max logit
+      before exponentiating (the standard numerically-stable softmax trick) —
+      implemented, guarding against silent NaNs on the degree-capped hub
+      nodes from Phase 2
+- [x] Unit tests exist and pass, including attention-weights-sum-to-1 checks
 
-Agent guardrails: same rule as Phase 3 — no `GATConv` import, ever.
+Agent guardrails: same rule as Phase 3 — no `GATConv` import, ever. Same
+canonical-single-implementation note as Phase 3 applies here too.
 
 Definition of Done: attention-sums-to-1 test passes; training is stable (loss
 decreases, no NaNs).
@@ -411,14 +410,20 @@ Goal: a rigorous, reusable train/eval loop *before* touching the novel idea, so
 Phase 7 has a trustworthy number to beat.
 
 Tasks
-- [ ] Handle class imbalance: class-weighted BCE loss at minimum; consider focal
-      loss if weighting alone underperforms
-- [ ] Metrics: **PR-AUC as the primary metric**, plus ROC-AUC, F1 at a chosen
-      threshold, and recall at a fixed precision — accuracy is reported only as a
-      footnote, never as the headline number
-- [ ] Config-driven `train.py --config configs/sage_baseline.yaml`, logging
-      metrics every epoch
-- [ ] Run both baselines to convergence; save a results table
+- [x] Handle class imbalance: `pos_weight` inside `BCEWithLogitsLoss`,
+      computed only from the training split (no leakage from val/test)
+- [x] Metrics: ROC-AUC, PR-AUC, and F1 are tracked (accuracy is
+      intentionally not used as the headline number, since a
+      not-fraud-always model already scores ~96.5% on IEEE-CIS)
+- [x] Config-driven `train.py --model <sage|gat|camouflage> --epochs N`,
+      with `NeighborLoader` mini-batching (fanout `[15, 15]`) so training
+      fits Kaggle's ~16GB GPU against the graph's 45.5M edges; best
+      checkpoint is selected by validation PR-AUC rather than the last
+      epoch, and test metrics are reported from that checkpoint
+- [ ] Run both from-scratch baselines (SAGE, GAT) to convergence (e.g. 20
+      epochs) and save a results table — not yet done; the furthest any run
+      has gotten so far is a short smoke test of the camouflage model (see
+      Phase 7), not a full convergence run of either baseline
 - [ ] **Train one non-graph reference baseline** — LightGBM/XGBoost (or, as a
       cheaper fallback, plain logistic regression) on the node feature matrix
       alone, completely ignoring graph structure, with the same splits and
@@ -433,13 +438,14 @@ Tasks
       exactly this reason. If it wins, that's still a real, honestly-reportable
       finding — it reframes your report's contribution toward "here's
       specifically where/why graph structure and camouflage-resistance help"
-      rather than "graphs beat tables," which is more defensible either way
+      rather than "graphs beat tables," which is more defensible either way.
+      **Not started.**
 
 Concepts to understand: why accuracy misleads under this level of class
-imbalance (see Phase 1 for the exact per-dataset figures); early-stopping on
-PR-AUC rather than raw loss; why tree-based models are historically hard to
-beat on tabular fraud data, and what that does and doesn't tell you about
-whether relational structure matters.
+imbalance (see Phase 1 for the exact figures); early-stopping on PR-AUC
+rather than raw loss; why tree-based models are historically hard to beat on
+tabular fraud data, and what that does and doesn't tell you about whether
+relational structure matters.
 
 Agent guardrails: every run's config and metrics get logged under
 `experiments/<run-name>/` — nothing lives only in terminal output. Record the
@@ -479,13 +485,22 @@ words — this becomes part of your report's related-work section):
   framing)
 
 Tasks
-- [ ] Write the four mechanism summaries
+- [ ] Write the four mechanism summaries and commit them — CARE-GNN's actual
+      label-aware filtering mechanism has already been studied and applied
+      correctly in Phase 7's design (see below), but none of the four
+      summaries has been written up and committed as a standalone document
+      yet
 - [ ] Write one clear paragraph stating exactly what you will do **differently**
       — a simplified or modified selection rule, a different similarity measure,
       combining ideas from two papers, the specific from-scratch/ablation angle
       — anything specific and defensible. "Applying this to transaction data"
       alone is *not* a valid answer (see the novelty note in §1) — be precise
-      about what's actually new
+      about what's actually new. The concrete answer for this project: a
+      from-scratch GAT baseline with a label-aware neighbor-trust signal
+      (per-node predicted fraud scores, with trust between neighbors based on
+      score agreement — see Phase 7), evaluated on IEEE-CIS with a direct
+      comparison against RL-GNN's published 0.872 AUROC. This still needs to
+      be written down as its own committed paragraph.
 
 Agent guardrails: this phase produces prose notes, not code. If asked to
 "implement CARE-GNN," push back and confirm scope with the user first — Phase 7
@@ -514,41 +529,53 @@ yourself, on IEEE-CIS specifically, with a direct comparison point against the
 report's contribution statement — it's precise and it holds up against a
 literature-aware reader.
 
-Pick **one** of these starting mechanisms and adapt it — don't try to build all
-three:
-- [ ] **Similarity-gated attention** — before computing GAT attention, compute a
-      feature-similarity score per node pair and down-weight or mask edges below
-      a threshold (learned or heuristic)
-- [ ] **Per-relation adaptive filtering** — for each relation type from Phase 2,
-      learn a separate filtering rule (same spirit as CARE-GNN's per-relation
-      similarity measure, but you define your own scoring function and update
-      rule — don't copy theirs)
-- [ ] **Label-aware contrastive term** — an auxiliary loss that pulls same-label
-      neighbor embeddings together and pushes different-label pairs apart, making
-      it structurally harder for a fraud node to hide inside a normal-looking
-      neighborhood
-      *(Caveat: if you're on Elliptic, remember 77% of nodes are unlabeled —
-      this mechanism needs same/different-label neighbor pairs to form its
-      contrastive terms, so your usable pool of pairs shrinks a lot on this
-      dataset specifically. Not a blocker if you pick this option and Elliptic,
-      just budget for it.)*
+**Chosen mechanism: label-aware similarity-gated attention.** Each
+camouflage-GAT layer (`camouflage_gat.py`) has a small per-node `score_head`
+(`nn.Linear`) that predicts a node's own fraud-likelihood from its projected
+features alone (no graph). Trust between two connected nodes is then
+`exp(-|score_src - score_dst|)` — neighbors are trusted when their
+independently-predicted fraud scores *agree*, not when their raw features
+look similar. This is a deliberate, corrected design choice: an earlier
+version of this mechanism used raw feature cosine similarity as the trust
+signal, but that was identified as backwards for a camouflage-resistance
+goal specifically — a camouflaged fraud node's entire purpose is to *look*
+similar to normal nodes in raw features, so rewarding feature similarity
+rewards successful camouflage rather than resisting it. The label-aware
+version is a closer, correct match to CARE-GNN's actual per-relation,
+label-aware filtering idea, adapted as an original mechanism rather than a
+port of CARE-GNN's code.
 
 Tasks
-- [ ] **Build this in two passes to de-risk the phase:**
-  - [ ] **V0 — fixed-heuristic version**: implement your chosen mechanism with
-        a hand-set threshold/rule instead of a learned one. Fast to build, and
-        gives you a real, working comparison point within days, not weeks.
-  - [ ] **V1 — learned version**: replace the fixed threshold/rule with the
-        learned mechanism as scoped above.
-  - [ ] If V1 has convergence trouble late in the timeline, V0 is still a
-        legitimate, reportable data point for Phase 8 — a documented "the
-        learned version didn't converge in time, here are the heuristic
-        version's numbers instead" beats having nothing to show.
-- [ ] Implement the chosen mechanism as a module wrapping/extending your Phase 4
-      GAT
-- [ ] Get it training end-to-end on a small subsample first for fast iteration,
-      then on the full graph
+- [x] Implement the chosen mechanism as a module wrapping/extending the
+      Phase 4 GAT — done: `camouflage_gat.py`'s `score_head` and label-aware
+      trust signal, with `FraudCamouflageGNN` in `models.py` exposing
+      `auxiliary_node_scores()` (the cached per-node scores, averaged across
+      heads and layers) so the scores can be supervised directly. `train.py`
+      adds a supervised auxiliary BCE loss against the true fraud labels,
+      weighted by a new `aux_loss_weight` config value (default `0.3`,
+      not yet tuned), alongside the main classification loss — this
+      supervision is what makes the trust signal meaningful in the first
+      place, since an untrained `score_head` would produce meaningless
+      "agreement" scores.
+- [ ] Build a simpler fixed-threshold/fixed-rule fallback version of the
+      same trust signal (no learned `score_head`) as a lower-risk backup —
+      not currently built. The implementation went straight to the learned
+      version; having a simple fallback ready is worth doing before heavy
+      Kaggle iteration starts, in case the learned version has convergence
+      trouble.
+- [ ] Get it training end-to-end on a small subsample first for fast
+      iteration, then on the full graph — not yet confirmed. No run of
+      `!python src/train.py --model camouflage --epochs 2` has completed
+      successfully yet; the most recent attempts were blocked in sequence by
+      a missing `torch_geometric` install on a fresh Kaggle session, then a
+      missing `data/processed/graph.pt` (expected, since `data/` is
+      gitignored and a fresh clone never includes it), and the most recent
+      `build_graph.py` rebuild was last seen with its output cut off
+      mid-run — it has not yet been confirmed whether that build actually
+      finished.
 - [ ] Compare against the Phase 5 baseline numbers on the **same split and seed**
+      — blocked on both this phase's training run and Phase 5's baseline
+      runs completing first.
 
 Agent guardrails: keep the mechanism swappable behind a config flag so Phase 8's
 ablations are config changes, not code forks. This is the most iteration-heavy
@@ -577,16 +604,11 @@ Tasks
       module wins in all 3 individually or only on average. If the margin over
       baseline is small, say so plainly in the report rather than letting the
       mean imply more consistency than 3 runs can support
-- [ ] **If using IEEE-CIS:** note RL-GNN's published 0.872 AUROC / 0.683 AP
-      (Appendix D) alongside your table as an external reference point — not a
-      strict apples-to-apples comparison (different splits/preprocessing almost
-      certainly), but useful context, and expect your professor or a reviewer
-      to ask how you compare to it
-- [ ] **If using Elliptic:** explicitly check performance across the later,
-      harder timesteps. Recent work has raised the concern that temporal
-      distribution shift alone explains a meaningful chunk of apparent GNN gains
-      on Elliptic — worth checking honestly rather than assuming the graph
-      structure is doing all the work.
+- [ ] Note RL-GNN's published 0.872 AUROC / 0.683 AP (Appendix D) alongside
+      your table as an external reference point — not a strict
+      apples-to-apples comparison (different splits/preprocessing almost
+      certainly), but useful context, and expect your professor or a
+      reviewer to ask how you compare to it
 - [ ] **Synthetic camouflage stress test.** Take your held-out known-fraud test
       nodes and synthetically add extra edges from a subset of them to random
       benign nodes, in steps (e.g. +0, +5, +10, +20 edges per fraud node), then
@@ -622,11 +644,11 @@ Goal: a qualitative story for your report/defense — *why* it works, not just
 
 Tasks
 - [ ] Find cases the baseline got wrong that your module fixed, and vice versa
-- [ ] **If using IEEE-CIS**, slice the "baseline got wrong, module fixed" cases
-      by `TransactionAmt` (e.g. top vs. bottom quartile) to check whether your
-      module's gains concentrate on high-value camouflaged fraud specifically.
-      A finding like "this mostly catches large, well-disguised transactions
-      the baseline missed" is a much stronger qualitative story for your
+- [ ] Slice the "baseline got wrong, module fixed" cases by `TransactionAmt`
+      (e.g. top vs. bottom quartile) to check whether your module's gains
+      concentrate on high-value camouflaged fraud specifically. A finding
+      like "this mostly catches large, well-disguised transactions the
+      baseline missed" is a much stronger qualitative story for your
       report/defense than an aggregate PR-AUC delta — and if the gains are
       spread evenly instead, that's a fine, honest thing to report too
 - [ ] Inspect attention weights on a handful of known-fraud nodes, before vs.
