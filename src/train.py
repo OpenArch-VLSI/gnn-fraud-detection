@@ -29,6 +29,11 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--run_name', type=str, default=None)
+    parser.add_argument('--patience', type=int, default=10,
+                         help="Stop training early if validation PR-AUC "
+                              "hasn't improved for this many consecutive "
+                              "epochs. Set to 0 to disable early stopping "
+                              "and always run the full --epochs count.")
     return parser.parse_args()
 
 def load_config(args):
@@ -137,6 +142,13 @@ def main():
     print("Starting training...")
     best_val_pr_auc = 0.0
     metrics_log = []
+    # Tracks how many consecutive epochs have passed since val PR-AUC last
+    # improved. Reset to 0 every time a new best is found; if it reaches
+    # config['patience'], training stops early instead of running the full
+    # --epochs count. This avoids burning GPU hours on epochs that aren't
+    # actually helping once the model has plateaued.
+    epochs_without_improvement = 0
+    patience = config.get('patience', 10)
 
     for epoch in range(1, config['epochs'] + 1):
         model.train()
@@ -149,12 +161,6 @@ def main():
             loss = criterion(out[:batch.batch_size], batch.y[:batch.batch_size].float())
 
             if is_camouflage_model:
-                # Supervise the camouflage layers' internal fraud-score
-                # heads with the SAME batch's true labels, over ALL sampled
-                # nodes in this batch (not just the seed nodes), since the
-                # score head's job is to inform neighbor trust for every
-                # node that participates in message passing, not just the
-                # ones being scored for the final prediction.
                 node_scores = model.auxiliary_node_scores()
                 aux_loss = criterion(node_scores, batch.y.float())
                 loss = loss + aux_loss_weight * aux_loss
@@ -204,6 +210,17 @@ def main():
             best_val_pr_auc = val_metrics['pr_auc']
             torch.save(model.state_dict(), os.path.join(exp_dir, 'best_model.pt'))
             print("  --> Saved new best model")
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            # patience == 0 means early stopping is disabled entirely --
+            # always run the full requested number of epochs.
+            if patience > 0 and epochs_without_improvement >= patience:
+                print(f"  --> No val PR-AUC improvement for {patience} "
+                      f"consecutive epochs (best so far: {best_val_pr_auc:.4f} "
+                      f"at an earlier epoch). Stopping early at epoch {epoch}/"
+                      f"{config['epochs']}.")
+                break
 
     # Save metrics
     with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
