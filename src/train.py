@@ -18,7 +18,7 @@ from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
 from torch_geometric.loader import NeighborLoader
 
-def parse_args():
+def build_parser():
     parser = argparse.ArgumentParser(description="Train Fraud Detection GNN")
     parser.add_argument('--config', type=str, help="Path to config YAML file")
     parser.add_argument('--model', type=str, choices=['sage', 'gat', 'camouflage'], default='sage')
@@ -40,20 +40,51 @@ def parse_args():
                               "containing last_model.pt, metrics.json, and "
                               "config.json to resume from. If omitted, "
                               "starts training from scratch.")
-    return parser.parse_args()
+    return parser
+
+def parse_args():
+    return build_parser().parse_args()
 
 def load_config(args):
-    cli_args = {k: v for k, v in vars(args).items() if v is not None}
-    config = vars(args).copy()
+    # BUGFIX: the previous version applied YAML values first, then
+    # unconditionally overwrote them with argparse's parsed namespace
+    # (config.update(cli_args)) -- but argparse fills in *default* values
+    # for every flag the user didn't pass, so cli_args was never just "what
+    # the user explicitly typed". That meant config.update(cli_args) wiped
+    # out YAML-set fields like `model`, `lr`, etc. back to their argparse
+    # defaults on every run, even when --config was the only flag given.
+    #
+    # Fix: only let CLI args override the YAML when the user actually
+    # passed that flag on the command line (i.e. it differs from
+    # argparse's own default for that arg), not merely because argparse
+    # populated it with a default value.
+    parser_defaults = {action.dest: action.default
+                        for action in build_parser()._actions
+                        if action.dest != 'help'}
+
+    config = parser_defaults.copy()
     if args.config and os.path.exists(args.config):
         with open(args.config, 'r') as f:
             yaml_config = yaml.safe_load(f)
             config.update(yaml_config)
-    
-    config.update(cli_args)
-    
+
+    # Now only apply CLI args that differ from the parser's own default --
+    # these are the ones the user actually explicitly passed.
+    explicit_cli_args = {
+        k: v for k, v in vars(args).items()
+        if k in parser_defaults and v != parser_defaults[k]
+    }
+    config.update(explicit_cli_args)
+
     if config.get('run_name') is None:
         config['run_name'] = f"{config['model']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # DEBUG: print the resolved config and exp_dir so we can confirm
+    # exactly what this run is using, given the bug we're diagnosing.
+    print("=== DEBUG: resolved config ===")
+    print(json.dumps(config, indent=2))
+    print(f"=== DEBUG: exp_dir will be: {os.path.join('experiments', config['run_name'])} ===")
+
     return config
 
 def validate_resume_config(old_config: dict, new_config: dict) -> None:
