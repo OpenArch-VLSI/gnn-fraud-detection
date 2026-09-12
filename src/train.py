@@ -18,23 +18,32 @@ from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
 from torch_geometric.loader import NeighborLoader
 
-def build_parser():
+def build_parser(suppress_defaults=False):
+    """
+    When suppress_defaults=True, omits `default=` for every flag except
+    --config, so parse_args() only returns keys the user actually typed
+    on the command line. Used to distinguish "explicitly passed" from
+    "argparse filled in its own default" -- see load_config().
+    """
+    d = argparse.SUPPRESS if suppress_defaults else None
     parser = argparse.ArgumentParser(description="Train Fraud Detection GNN")
     parser.add_argument('--config', type=str, help="Path to config YAML file")
-    parser.add_argument('--model', type=str, choices=['sage', 'gat', 'camouflage'], default='sage')
-    parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--lr', type=float, default=0.01)
-    parser.add_argument('--hidden_channels', type=int, default=64)
-    parser.add_argument('--heads', type=int, default=4)
-    parser.add_argument('--dropout', type=float, default=0.3)
-    parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--run_name', type=str, default=None)
-    parser.add_argument('--patience', type=int, default=10,
+    parser.add_argument('--model', type=str, choices=['sage', 'gat', 'camouflage'],
+                         default=d if suppress_defaults else 'sage')
+    parser.add_argument('--epochs', type=int, default=d if suppress_defaults else 100)
+    parser.add_argument('--lr', type=float, default=d if suppress_defaults else 0.01)
+    parser.add_argument('--hidden_channels', type=int, default=d if suppress_defaults else 64)
+    parser.add_argument('--heads', type=int, default=d if suppress_defaults else 4)
+    parser.add_argument('--dropout', type=float, default=d if suppress_defaults else 0.3)
+    parser.add_argument('--seed', type=int, default=d if suppress_defaults else 42)
+    parser.add_argument('--run_name', type=str, default=d if suppress_defaults else None)
+    parser.add_argument('--patience', type=int,
+                         default=d if suppress_defaults else 10,
                          help="Stop training early if validation PR-AUC "
                               "hasn't improved for this many consecutive "
                               "epochs. Set to 0 to disable early stopping "
                               "and always run the full --epochs count.")
-    parser.add_argument('--resume_dir', type=str, default=None,
+    parser.add_argument('--resume_dir', type=str, default=d if suppress_defaults else None,
                          help="Path to a mounted previous exp_dir (e.g. "
                               "/kaggle/input/<slug>/experiments/<run_name>) "
                               "containing last_model.pt, metrics.json, and "
@@ -46,18 +55,15 @@ def parse_args():
     return build_parser().parse_args()
 
 def load_config(args):
-    # BUGFIX: the previous version applied YAML values first, then
-    # unconditionally overwrote them with argparse's parsed namespace
-    # (config.update(cli_args)) -- but argparse fills in *default* values
-    # for every flag the user didn't pass, so cli_args was never just "what
-    # the user explicitly typed". That meant config.update(cli_args) wiped
-    # out YAML-set fields like `model`, `lr`, etc. back to their argparse
-    # defaults on every run, even when --config was the only flag given.
-    #
-    # Fix: only let CLI args override the YAML when the user actually
-    # passed that flag on the command line (i.e. it differs from
-    # argparse's own default for that arg), not merely because argparse
-    # populated it with a default value.
+    # Determine which flags the user actually typed on the CLI (as opposed
+    # to argparse filling in a default) by re-parsing sys.argv with a
+    # parser that has no defaults at all except --config. Any key present
+    # in this second parse was explicitly passed; anything absent was not
+    # -- this is unambiguous even if the explicit value happens to equal
+    # the normal parser's default (e.g. explicitly passing --lr 0.01 when
+    # 0.01 is also the argparse default for --lr).
+    explicit_args = vars(build_parser(suppress_defaults=True).parse_args())
+
     parser_defaults = {action.dest: action.default
                         for action in build_parser()._actions
                         if action.dest != 'help'}
@@ -68,19 +74,15 @@ def load_config(args):
             yaml_config = yaml.safe_load(f)
             config.update(yaml_config)
 
-    # Now only apply CLI args that differ from the parser's own default --
-    # these are the ones the user actually explicitly passed.
-    explicit_cli_args = {
-        k: v for k, v in vars(args).items()
-        if k in parser_defaults and v != parser_defaults[k]
-    }
-    config.update(explicit_cli_args)
+    # Only CLI args the user actually typed override the YAML.
+    config.update(explicit_args)
 
     if config.get('run_name') is None:
         config['run_name'] = f"{config['model']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # DEBUG: print the resolved config and exp_dir so we can confirm
-    # exactly what this run is using, given the bug we're diagnosing.
+    # DEBUG: print the resolved config and exp_dir so it's immediately
+    # visible in the logs which model/hyperparameters this run is
+    # actually using, rather than only discoverable after the fact.
     print("=== DEBUG: resolved config ===")
     print(json.dumps(config, indent=2))
     print(f"=== DEBUG: exp_dir will be: {os.path.join('experiments', config['run_name'])} ===")
