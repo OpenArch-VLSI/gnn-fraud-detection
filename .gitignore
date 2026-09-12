@@ -24,7 +24,13 @@ data/
 !data/.gitkeep
 
 # Experiments & Logs
-experiments/
+experiments/*
+!experiments/sage_baseline/
+experiments/sage_baseline/*
+!experiments/sage_baseline/best_model.pt
+!experiments/sage_baseline/last_model.pt
+!experiments/sage_baseline/metrics.json
+!experiments/sage_baseline/config.json
 *.log
 
 # Documentation
@@ -41,4 +47,5 @@ Thumbs.db
 *.ckpt
 *.h5
 *.pb
-
+!experiments/sage_baseline/best_model.pt
+!experiments/sage_baseline/last_model.pt

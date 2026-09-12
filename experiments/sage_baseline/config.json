@@ -1,0 +1,13 @@
+{
+    "config": "configs/sage_baseline.yaml",
+    "model": "sage",
+    "epochs": 100,
+    "lr": 0.01,
+    "hidden_channels": 64,
+    "heads": 4,
+    "dropout": 0.3,
+    "seed": 42,
+    "run_name": "sage_baseline",
+    "patience": 10,
+    "resume_dir": null
+}
