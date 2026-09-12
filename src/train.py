@@ -34,6 +34,12 @@ def parse_args():
                               "hasn't improved for this many consecutive "
                               "epochs. Set to 0 to disable early stopping "
                               "and always run the full --epochs count.")
+    parser.add_argument('--resume_dir', type=str, default=None,
+                         help="Path to a mounted previous exp_dir (e.g. "
+                              "/kaggle/input/<slug>/experiments/<run_name>) "
+                              "containing last_model.pt, metrics.json, and "
+                              "config.json to resume from. If omitted, "
+                              "starts training from scratch.")
     return parser.parse_args()
 
 def load_config(args):
@@ -50,9 +56,59 @@ def load_config(args):
         config['run_name'] = f"{config['model']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     return config
 
+def validate_resume_config(old_config: dict, new_config: dict) -> None:
+    """
+    Raises ValueError if new_config's model-defining fields don't match
+    old_config's. Without this check, resuming with a mismatched --model,
+    --hidden_channels, or --heads/--dropout (for gat/camouflage) would make
+    load_state_dict either error out with a confusing shape-mismatch, or in
+    rarer cases silently misload weights into the wrong-shaped tensors.
+    """
+    # Fields that affect model architecture for every model type.
+    always_checked = ['model', 'hidden_channels']
+    # Fields that only apply to gat/camouflage -- sage's GraphSAGEModel
+    # constructor (see models.py / train.py's instantiation branch) only
+    # takes (in_channels, hidden_channels), no heads/dropout.
+    conditional_checked = ['heads', 'dropout']
+
+    mismatches = []
+    for key in always_checked:
+        if old_config.get(key) != new_config.get(key):
+            mismatches.append(
+                f"  {key}: old={old_config.get(key)!r} vs new={new_config.get(key)!r}")
+
+    if new_config['model'] in ('gat', 'camouflage'):
+        for key in conditional_checked:
+            if old_config.get(key) != new_config.get(key):
+                mismatches.append(
+                    f"  {key}: old={old_config.get(key)!r} vs new={new_config.get(key)!r}")
+
+    if mismatches:
+        raise ValueError(
+            "Cannot resume: the following config fields differ between the "
+            "checkpoint being resumed and this run's config, which would "
+            "make load_state_dict error or silently misload:\n"
+            + "\n".join(mismatches)
+        )
+
 def main():
     args = parse_args()
     config = load_config(args)
+
+    # If resuming, load the old run's config up front so we can validate
+    # architecture compatibility before doing any real work (data loading,
+    # model construction, etc.) -- fail fast rather than partway through.
+    old_config = None
+    if config.get('resume_dir'):
+        old_config_path = os.path.join(config['resume_dir'], 'config.json')
+        if not os.path.exists(old_config_path):
+            raise FileNotFoundError(
+                f"--resume_dir given as {config['resume_dir']} but no "
+                f"config.json found there -- check the mounted input path.")
+        with open(old_config_path, 'r') as f:
+            old_config = json.load(f)
+        validate_resume_config(old_config, config)
+
     set_seed(config['seed'])
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -140,6 +196,11 @@ def main():
         )
 
     print("Starting training...")
+
+    # Resume state (overridden below if --resume_dir was given). Kept as a
+    # single block so there's exactly one place these get initialized --
+    # no duplicate/conflicting initializations later in the function.
+    start_epoch = 1
     best_val_pr_auc = 0.0
     metrics_log = []
     # Tracks how many consecutive epochs have passed since val PR-AUC last
@@ -150,7 +211,34 @@ def main():
     epochs_without_improvement = 0
     patience = config.get('patience', 10)
 
-    for epoch in range(1, config['epochs'] + 1):
+    if config.get('resume_dir'):
+        checkpoint_path = os.path.join(config['resume_dir'], 'last_model.pt')
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(
+                f"--resume_dir given as {config['resume_dir']} but no "
+                f"last_model.pt found there.")
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_val_pr_auc = checkpoint.get('best_val_pr_auc', 0.0)
+        epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
+
+        # Reload prior epoch-by-epoch history so the new version's
+        # metrics.json continues the full record instead of restarting it,
+        # which would otherwise silently drop everything from the previous
+        # commit's run.
+        old_metrics_path = os.path.join(config['resume_dir'], 'metrics.json')
+        if os.path.exists(old_metrics_path):
+            with open(old_metrics_path, 'r') as f:
+                metrics_log = json.load(f)
+
+        print(f"Resuming from epoch {start_epoch} "
+              f"(best_val_pr_auc so far: {best_val_pr_auc:.4f}, "
+              f"epochs_without_improvement: {epochs_without_improvement})")
+
+    for epoch in range(start_epoch, config['epochs'] + 1):
         model.train()
         total_loss = 0
         total_batches = 0
@@ -206,13 +294,43 @@ def main():
             **val_metrics
         })
 
+        # Rewrite metrics.json every epoch (not just after the loop ends) so
+        # that a mid-run kill (session timeout, commit time limit, crash)
+        # still leaves the full epoch-by-epoch history on disk up to the
+        # last completed epoch, instead of losing it all.
+        with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
+            json.dump(metrics_log, f, indent=4)
+
         if val_metrics['pr_auc'] > best_val_pr_auc:
             best_val_pr_auc = val_metrics['pr_auc']
-            torch.save(model.state_dict(), os.path.join(exp_dir, 'best_model.pt'))
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'best_val_pr_auc': best_val_pr_auc,
+            }, os.path.join(exp_dir, 'best_model.pt'))
             print("  --> Saved new best model")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
+
+        # Rolling "last epoch" checkpoint, saved every epoch regardless of
+        # whether it's a new best. Includes optimizer state, the epoch
+        # number, and early-stopping counters (not just model weights) so a
+        # killed run can be *resumed* from exactly where it left off,
+        # rather than only being usable for evaluation/fine-tuning the way
+        # a bare state_dict would be. Saved after the improvement check
+        # above so these counters reflect this epoch's outcome, not the
+        # previous epoch's.
+        torch.save({
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': epoch,
+            'best_val_pr_auc': best_val_pr_auc,
+            'epochs_without_improvement': epochs_without_improvement,
+        }, os.path.join(exp_dir, 'last_model.pt'))
+
+        if epochs_without_improvement > 0:
             # patience == 0 means early stopping is disabled entirely --
             # always run the full requested number of epochs.
             if patience > 0 and epochs_without_improvement >= patience:
