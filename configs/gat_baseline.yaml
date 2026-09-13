@@ -1,6 +1,6 @@
 model: "gat"
 epochs: 100
-lr: 0.005
+lr: 0.001
 hidden_channels: 64
 heads: 4
 dropout: 0.3

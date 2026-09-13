@@ -287,6 +287,21 @@ def main():
                 loss = loss + aux_loss_weight * aux_loss
 
             loss.backward()
+            # Gradient clipping: GATConv's attention mechanism computes
+            # softmax-normalized weights via exp() over learned attention
+            # logits (att_src/att_dst dotted with projected features). If a
+            # node's neighborhood contains outlier feature values (StandardScaler
+            # normalizes to mean 0/std 1 but doesn't bound tails, and raw
+            # transaction data is heavy-tailed), the resulting attention logits
+            # and their gradients can spike sharply for that batch. Without
+            # clipping, a single such batch can meaningfully perturb the whole
+            # model in one step -- this is the most likely cause of the sharp
+            # single-epoch PR-AUC/ROC-AUC collapses seen in early GAT runs
+            # (e.g. epoch 21 PR-AUC 0.148 -> epoch 22 PR-AUC 0.049). SAGE's
+            # mean-aggregation has no exponential amplification step and
+            # doesn't exhibit this. max_norm=1.0 is a standard, conservative
+            # starting point; not expected to hurt SAGE/camouflage either.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
             total_batches += 1
