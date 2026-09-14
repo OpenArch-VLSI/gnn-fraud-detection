@@ -48,8 +48,16 @@ def main():
         model = FraudCamouflageGNN(in_channels, config.get('hidden_channels', 64), heads=config.get('heads', 4), dropout=config.get('dropout', 0.3)).to(device)
     else:
         raise ValueError("Unknown model type")
-        
-    model.load_state_dict(torch.load(model_path, map_location=device))
+
+    # BUGFIX: train.py saves checkpoints as a dict with multiple keys
+    # ({'model': state_dict, 'optimizer': ..., 'epoch': ..., ...}), not as
+    # a bare state_dict. Passing that whole dict straight into
+    # load_state_dict() raises a RuntimeError (missing/unexpected keys)
+    # every time -- this was silently blocking all test-set evaluation for
+    # every model, since run_experiments.py calls this script right after
+    # every training run and would fail here immediately.
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model'])
     model.eval()
 
     print("Setting up test data loader...")
