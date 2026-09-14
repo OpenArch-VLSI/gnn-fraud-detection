@@ -67,10 +67,26 @@ def build_graph(transaction_file, identity_file, limit=None):
     numeric_cols = features_df.select_dtypes(include=['int64', 'float64']).columns
     categorical_cols = features_df.select_dtypes(include=['object']).columns
     
-    # Impute numeric with 0 (a simplistic approach, could be improved)
-    features_df[numeric_cols] = features_df[numeric_cols].fillna(0)
-    
     train_end = int(len(df) * 0.7)
+
+    # BUGFIX: numeric NaNs were previously filled with a raw 0 *before*
+    # StandardScaler was fit/applied. For columns with a non-zero natural
+    # mean and substantial missingness (common among the anonymized V1-V339
+    # features in this dataset), a raw 0 fill becomes an artificial outlier
+    # once scaled -- e.g. a column with train-mean 50 and std 10 turns every
+    # NaN into a scaled value of -5.0, a value the model has no way to tell
+    # apart from a genuine extreme case. This is especially harmful for
+    # attention-based models (GAT/camouflage-GAT), whose attention logits
+    # are more sensitive to input-feature outliers than SAGE's mean
+    # aggregation.
+    #
+    # Fix: impute each numeric column's NaNs with that column's own
+    # TRAIN-SPLIT median (a robust, distribution-appropriate fill value)
+    # computed only from the train portion, consistent with how the scaler
+    # and categorical encoder below are already fit only on train_end to
+    # avoid leaking val/test statistics into imputation.
+    numeric_medians = features_df.iloc[:train_end][numeric_cols].median()
+    features_df[numeric_cols] = features_df[numeric_cols].fillna(numeric_medians)
     
     # Encode categorical
     features_df[categorical_cols] = features_df[categorical_cols].fillna('MISSING')
