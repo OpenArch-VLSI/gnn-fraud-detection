@@ -26,11 +26,17 @@ data/
 # Experiments & Logs
 experiments/*
 !experiments/sage_baseline/
+!experiments/gat_baseline/
 experiments/sage_baseline/*
+experiments/gat_baseline/*
 !experiments/sage_baseline/best_model.pt
 !experiments/sage_baseline/last_model.pt
 !experiments/sage_baseline/metrics.json
 !experiments/sage_baseline/config.json
+!experiments/gat_baseline/best_model.pt
+!experiments/gat_baseline/last_model.pt
+!experiments/gat_baseline/metrics.json
+!experiments/gat_baseline/config.json
 *.log
 
 # Documentation
@@ -49,3 +55,5 @@ Thumbs.db
 *.pb
 !experiments/sage_baseline/best_model.pt
 !experiments/sage_baseline/last_model.pt
+!experiments/gat_baseline/best_model.pt
+!experiments/gat_baseline/last_model.pt

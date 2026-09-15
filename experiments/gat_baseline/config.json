@@ -1,0 +1,13 @@
+{
+    "config": "configs/gat_baseline.yaml",
+    "model": "gat",
+    "epochs": 100,
+    "lr": 0.001,
+    "hidden_channels": 64,
+    "heads": 4,
+    "dropout": 0.3,
+    "seed": 42,
+    "run_name": "gat_baseline",
+    "patience": 10,
+    "resume_dir": null
+}
