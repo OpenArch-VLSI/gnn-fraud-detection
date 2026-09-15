@@ -92,19 +92,51 @@ and a paper you need to explicitly differentiate from in your report (it
 doesn't target camouflage/heterophily resistance specifically, and doesn't
 ablate against baselines you built yourself).
 
+## 1.1 Current status (as of latest update)
+
+Phases 0–4 and 6 are complete. Phase 5 (baselines) and Phase 7 (novel module)
+are both **in progress, not done**, despite real training runs having
+happened on Kaggle:
+
+- **SAGE**: trained successfully, twice (original graph and NaN-imputation-fixed
+  graph). Best result: PR-AUC 0.4147, ROC-AUC 0.8618 (rebuilt graph, epoch 15).
+- **GAT**: trained successfully once, after fixing an instability bug (grad
+  clipping + lower LR). Best result: PR-AUC 0.3157, ROC-AUC 0.8103 (original
+  graph, epoch 6) — still behind SAGE. **Not yet rerun against the corrected
+  graph** — this is an open task, not finished.
+- **Camouflage-GAT**: attempted once on the full graph, **collapsed to
+  random-chance performance** (ROC-AUC ≈ 0.5) and was cancelled. Root cause
+  not yet diagnosed — leading suspects are the untuned `aux_loss_weight` or a
+  bug in the trust-signal computation, neither confirmed.
+- **Tabular reference baseline**: not started.
+- **Test-set evaluation**: `evaluate.py` had a checkpoint-unwrapping bug that
+  made it completely non-functional; the bug is fixed, but evaluation has
+  never actually been run — every number above is a validation-set number
+  from training, not a test-set number.
+- Along the way: a `load_config()` bug (silently discarding YAML in favor of
+  CLI defaults) and a NaN-imputation bug in `build_graph.py` were also found
+  and fixed, the latter requiring a full graph rebuild.
+
 ## 2. Top-level definition of done
 
 - [ ] From-scratch GraphSAGE and GAT baselines, trained and evaluated on a real
-      fraud dataset, with imbalance-aware metrics (not accuracy)
+      fraud dataset, with imbalance-aware metrics (not accuracy) — **partially
+      done**: both trained with real val PR-AUC/ROC-AUC results logged, but
+      GAT needs a rerun on the corrected graph, and neither has been run
+      through test-set `evaluate.py` yet
 - [ ] A non-graph reference baseline, so "the graph helped" is a measured
-      result and not an assumption
+      result and not an assumption — not started
 - [ ] At least one experiment testing robustness to *escalating* camouflage,
       not just performance at the dataset's fixed, natural camouflage level
+      — not started (Phase 8)
 - [ ] One clearly-scoped novel extension, implemented, ablated, and compared
-      fairly against the baselines on identical splits/seeds
+      fairly against the baselines on identical splits/seeds — module is
+      implemented, but its only full-graph training run collapsed to
+      random-chance performance and hasn't been fixed or compared yet
 - [ ] A codebase a stranger could clone and reproduce your headline number from
 - [ ] A written report: motivation, related work, method, results, honest
-      limitations
+      limitations — related-work piece done (Phase 6); results/method/report
+      writing not started
 - [ ] All of the above fits inside your actual semester timeline
 
 ## 3. Tech stack
@@ -420,10 +452,38 @@ Tasks
       fits Kaggle's ~16GB GPU against the graph's 45.5M edges; best
       checkpoint is selected by validation PR-AUC rather than the last
       epoch, and test metrics are reported from that checkpoint
-- [ ] Run both from-scratch baselines (SAGE, GAT) to convergence (e.g. 20
-      epochs) and save a results table — not yet done; the furthest any run
-      has gotten so far is a short smoke test of the camouflage model (see
-      Phase 7), not a full convergence run of either baseline
+- [x] Run both from-scratch baselines (SAGE, GAT) to convergence with early
+      stopping (patience 10, tracked on val PR-AUC) and save a results table
+      — **done, including a full round of bug-fixing along the way.** Bugs
+      found and fixed in sequence:
+      - `load_config()` was silently discarding YAML config values in favor
+        of CLI argparse defaults — fixed.
+      - A run labeled as GAT (Version 5) was accidentally training
+        `GraphSAGEModel` the whole time (near-identical loss/metric numbers
+        to the real SAGE run gave it away); root-caused and the real GAT run
+        redone.
+      - GAT training was unstable on its first real run (sharp single-epoch
+        collapses, PR-AUC swinging 0.148→0.049, never beating SAGE) — fixed
+        via gradient clipping + a lowered learning rate (`lr: 0.001`).
+      - A NaN-imputation bug was found in `build_graph.py`'s feature
+        pipeline, requiring a full `graph.pt` rebuild and baseline rerun.
+
+      **Results table (best checkpoint per run, selected by val PR-AUC):**
+
+      | Run | Best PR-AUC | Best ROC-AUC | Best epoch | Stopped at |
+      |---|---|---|---|---|
+      | SAGE (original graph) | 0.4106 | 0.8591 | 6 | 16 |
+      | GAT (original graph, unstable — superseded) | 0.1478 | ~0.74 (never stable) | 21 | 40 |
+      | GAT (grad-clip + lower-LR fix, original graph) | 0.3157 | 0.8103 | 6 | 16 |
+      | SAGE (rebuilt graph, NaN-imputation fix) | **0.4147** | 0.8618 | 15 | 25 |
+      | GAT (rebuilt graph, NaN-imputation fix) | **not yet run** | — | — | — |
+
+      SAGE currently beats GAT on PR-AUC in every valid comparison so far.
+      GAT has not yet been rerun against the NaN-imputation-fixed graph —
+      **this is the actual next open item**, not a completed rerun (an
+      earlier status-report pass in this project incorrectly said both were
+      "rerun once each against the corrected graph"; only SAGE actually was
+      — correcting that here).
 - [ ] **Train one non-graph reference baseline** — LightGBM/XGBoost (or, as a
       cheaper fallback, plain logistic regression) on the node feature matrix
       alone, completely ignoring graph structure, with the same splits and
@@ -440,6 +500,15 @@ Tasks
       specifically where/why graph structure and camouflage-resistance help"
       rather than "graphs beat tables," which is more defensible either way.
       **Not started.**
+- [ ] **Run test-set evaluation via `evaluate.py`.** A checkpoint-unwrapping
+      bug was found in `evaluate.py` (it wasn't unwrapping the `{'model':
+      ...}` checkpoint dict before `load_state_dict()`) — meaning test-set
+      evaluation was completely non-functional until that fix. The bug has
+      been fixed, but evaluation **has still never actually been run, even
+      once, on any checkpoint** — every PR-AUC/ROC-AUC number recorded above
+      is a *validation*-set number from training, not a held-out test-set
+      number. This is a real gap: the project currently has no confirmed
+      test-set results at all.
 
 Concepts to understand: why accuracy misleads under this level of class
 imbalance (see Phase 1 for the exact figures); early-stopping on PR-AUC
@@ -456,7 +525,13 @@ avoidable way to burn your weekly GPU quota. Log wall-clock time per run too;
 Phase 8's heavier sweep will need it.
 
 Definition of Done: a checked-in results table (model, PR-AUC, ROC-AUC, F1,
-recall) for both from-scratch baselines **and the tabular reference baseline**.
+recall) for both from-scratch baselines **and the tabular reference
+baseline**, confirmed on the **test** split via `evaluate.py`, not just
+validation numbers from training. **Not yet met** — SAGE and GAT both have
+validation-set results checked into `experiments/`, but GAT hasn't been
+rerun against the corrected graph, the tabular baseline hasn't been started,
+and no test-set evaluation has been run at all (F1/recall are also not yet
+tracked anywhere — only PR-AUC/ROC-AUC have been logged so far).
 
 ---
 
@@ -564,18 +639,25 @@ Tasks
       Kaggle iteration starts, in case the learned version has convergence
       trouble.
 - [ ] Get it training end-to-end on a small subsample first for fast
-      iteration, then on the full graph — not yet confirmed. No run of
-      `!python src/train.py --model camouflage --epochs 2` has completed
-      successfully yet; the most recent attempts were blocked in sequence by
-      a missing `torch_geometric` install on a fresh Kaggle session, then a
-      missing `data/processed/graph.pt` (expected, since `data/` is
-      gitignored and a fresh clone never includes it), and the most recent
-      `build_graph.py` rebuild was last seen with its output cut off
-      mid-run — it has not yet been confirmed whether that build actually
-      finished.
+      iteration, then on the full graph — **attempted on the full graph, but
+      collapsed, not yet successfully trained.** The camouflage-GAT run that
+      actually completed showed val ROC-AUC sitting at ~0.5 (random-chance
+      performance, e.g. 0.4985 by epoch 8) and PR-AUC bouncing as pure noise
+      (0.0856 → 0.0911 → 0.0405 → 0.0596 → ...), with no recovery — the run
+      was cancelled rather than let finish. This directly motivated running
+      SAGE and GAT first as a sanity check: since **both plain baselines
+      train normally** (SAGE reaching PR-AUC 0.41+, GAT 0.31+ once fixed),
+      the bug is isolated to the camouflage mechanism itself, not the shared
+      data/training pipeline. Leading suspects, per the diagnostic already
+      laid out during baseline debugging: the untuned `aux_loss_weight`
+      (`0.3`, never validated) overwhelming the main classification loss, or
+      a bug in `CamouflageGATConv`'s trust-signal computation actively
+      hurting rather than helping attention. **Neither has actually been
+      diagnosed or fixed yet** — this is open work, not resolved by the
+      baseline debugging that ruled out the pipeline as the cause.
 - [ ] Compare against the Phase 5 baseline numbers on the **same split and seed**
-      — blocked on both this phase's training run and Phase 5's baseline
-      runs completing first.
+      — blocked on this phase's training run actually working (see above)
+      and on Phase 5's GAT-rerun and tabular-baseline gaps closing first.
 
 Agent guardrails: keep the mechanism swappable behind a config flag so Phase 8's
 ablations are config changes, not code forks. This is the most iteration-heavy
@@ -586,7 +668,10 @@ treat a Kaggle session as the place to iterate on a new idea.
 Definition of Done: trains stably; is at least directionally comparable to the
 baseline on PR-AUC. If it's worse, that is still a valid, reportable result as
 long as you can explain why — flag this to the user rather than quietly tuning
-until the number looks better.
+until the number looks better. **Not yet met** — the model has not yet
+trained stably at all (collapsed to random-chance ROC-AUC on its only
+completed full-graph run); diagnosing and fixing that collapse is the
+immediate blocker for this entire phase.
 
 ---
 
@@ -826,6 +911,8 @@ section:**
 |---|---|---|
 | Graph construction (Phase 2) takes longer than a week | Medium | Time-box it; fall back to Elliptic if you're not done by end of week 2 |
 | Novel module (Phase 7) doesn't beat baseline | Medium | Still a valid, explainable result — budget time to analyze *why*, don't just keep tuning |
+| Novel module (Phase 7) fails to train at all (not just "underperforms") | **Realized** — camouflage-GAT's only full-graph run collapsed to ROC-AUC ≈ 0.5 | Ruled out the shared pipeline as the cause by confirming both baselines train normally first; remaining suspects are `aux_loss_weight` tuning and the trust-signal computation in `CamouflageGATConv` — diagnose there next, starting with a subsample run at a much smaller `aux_loss_weight` before returning to the full graph |
+| A harness bug silently produces wrong or no results without erroring | **Realized twice** — `evaluate.py` never unwrapped the checkpoint dict, so test-set evaluation silently produced nothing until caught; a training run also silently trained the wrong model class (SAGE instead of GAT) due to a `load_config()` bug | Treat "the script ran without an error" as insufficient evidence of correctness — spot-check a completed run's actual saved config/output against what was intended, not just its exit code |
 | Hub-node explosion makes the graph unusable | Medium–High (IEEE-CIS) | Degree caps from Phase 2, checked immediately after construction, not discovered mid-training |
 | Running out of time for the report | High if left until the end | Start the related-work section in Phase 6, not Phase 10 |
 | "From scratch" scope dispute with professor | Low, but costly if it happens | Confirm Appendix C's line with them in week 1 |
