@@ -63,3 +63,6 @@ Thumbs.db
 !experiments/camo_gat_baseline/last_model.pt
 !experiments/camo_gat_baseline/metrics.json
 !experiments/camo_gat_baseline/config.json
+
+# LightGBM tabular baseline results (no graph)
+!experiments/lgbm_tabular/

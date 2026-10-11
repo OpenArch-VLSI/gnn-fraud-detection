@@ -7,8 +7,7 @@ import sys
 # Adjust path so we can run from anywhere
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.models.models import FraudGAT, FraudCamouflageGNN
-from src.models.layers.sage import GraphSAGEModel
+from src.models.models import FraudGAT, FraudCamouflageGNN, GraphSAGEModel
 from src.utils.metrics import compute_metrics
 from torch_geometric.loader import NeighborLoader
 

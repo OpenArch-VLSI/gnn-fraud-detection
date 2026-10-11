@@ -12,8 +12,7 @@ from datetime import datetime
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.models.models import FraudGAT, FraudCamouflageGNN
-from src.models.layers.sage import GraphSAGEModel
+from src.models.models import FraudGAT, FraudCamouflageGNN, GraphSAGEModel
 from src.utils.metrics import compute_metrics
 from src.utils.seed import set_seed
 from torch_geometric.loader import NeighborLoader
@@ -189,9 +188,9 @@ def main():
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     # For the camouflage-resistant model only: an auxiliary BCE loss trains
-    # each CamouflageGATConv layer's internal `score_head` to predict true
-    # fraud labels. Without this, the label-aware trust signal the layer
-    # relies on (see camouflage_gat.py) would be computed from an untrained,
+    # the model's `score_head` to predict true fraud labels. Without this,
+    # the label-aware trust signal the model relies on (see models.py) would be
+    # computed from an untrained,
     # meaningless score head -- this is what actually makes it label-aware
     # rather than just an unsupervised, arbitrarily-initialized detour.
     # Weighted low relative to the main loss since it's a supporting signal,

@@ -1,5 +1,23 @@
 # Project Status Report
 
+## Current Architecture (2026-10-12): library layers, from-scratch dropped
+
+**Decision:** the from-scratch constraint (roadmap Appendix C) was dropped by the project owner to pursue library-based models. The roadmap lists this as a professor requirement for graded work. Confirm with the professor before any result is used for grading; the report must state this change.
+
+**What changed**
+* `src/models/models.py` now uses PyG layers: `GraphSAGEModel` (`SAGEConv`, mean, ReLU + dropout), `FraudGAT` (`GATConv`), and `FraudCamouflageGNN` (`GATConv` with a trust edge feature).
+* **Camouflage mechanism, redesigned:** one `score_head` (MLP on input features) predicts a per-node fraud score, supervised by the auxiliary loss on seed nodes. Trust per edge = exp(-|s_u - s_v|) is passed to each `GATConv` as an edge feature. `GATConv` adds a learned per-head term linear in trust to the attention logits before LeakyReLU. The sign is learned, not constrained: check `trust_gains()`. Self-loops receive the mean trust (PyG default), not the maximum.
+* **LightGBM baseline added:** `src/train_tabular.py`, `configs/lgbm_tabular.yaml`, LightGBM 4.7.0 pinned. Node features only, same time-based masks, `scale_pos_weight` on the train split, early stopping on validation PR-AUC.
+* Hand-written layers in `src/models/layers/` are no longer used by the models. Kept as reference, not deleted.
+
+**Consequences**
+* **All earlier SAGE/GAT/camouflage numbers are from old architectures and are invalid for comparison.** Rerun every baseline on the new code. The earlier SAGE model had no BatchNorm or dropout, despite what earlier status text said.
+* `NeighborLoader` needs `pyg-lib` or `torch-sparse` on the training machine. Kaggle's image should have them; the local sandbox does not, so `train.py` was not run end-to-end here.
+
+**Verification (2026-10-12, CPU, torch 2.14.1, PyG 2.8.0.post1, LightGBM 4.7.0)**
+* `pytest tests/`: 16 passed (legacy layer tests, PyG model tests incl. trust-feature check, LightGBM tests, `train.py --help`).
+* Full-batch sanity run on a synthetic graph: all three models train without NaN; camouflage trust gains positive for every head. **Synthetic only; not evidence about IEEE-CIS.**
+
 ## Completed Phases
 * **Phase 0 (Environment & Repo Setup):**
   * Repository structure initialized, GitHub repo created, `.gitignore` setup.

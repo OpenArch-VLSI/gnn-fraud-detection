@@ -9,3 +9,4 @@ pyyaml
 python-dotenv
 langchain-google-genai
 langgraph
+lightgbm==4.7.0
