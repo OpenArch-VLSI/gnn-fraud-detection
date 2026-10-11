@@ -8,14 +8,15 @@
 * `src/models/models.py` now uses PyG layers: `GraphSAGEModel` (`SAGEConv`, mean, ReLU + dropout), `FraudGAT` (`GATConv`), and `FraudCamouflageGNN` (`GATConv` with a trust edge feature).
 * **Camouflage mechanism, redesigned:** one `score_head` (MLP on input features) predicts a per-node fraud score, supervised by the auxiliary loss on seed nodes. Trust per edge = exp(-|s_u - s_v|) is passed to each `GATConv` as an edge feature. `GATConv` adds a learned per-head term linear in trust to the attention logits before LeakyReLU. The sign is learned, not constrained: check `trust_gains()`. Self-loops receive the mean trust (PyG default), not the maximum.
 * **LightGBM baseline added:** `src/train_tabular.py`, `configs/lgbm_tabular.yaml`, LightGBM 4.7.0 pinned. Node features only, same time-based masks, `scale_pos_weight` on the train split, early stopping on validation PR-AUC.
+* **Node features changed (`src/data/build_graph.py`):** `TransactionAmt` is log1p-transformed; categoricals are train-split frequencies instead of ordinal codes; five label-free per-card features (`card_prior_count`, `card_prior_amt_mean`, `card_prior_amt_std`, `card_amt_dev`, `card_log_gap`) use only earlier transactions on the same `card1`. The time-based masks and edge construction are unchanged.
 * Hand-written layers in `src/models/layers/` are no longer used by the models. Kept as reference, not deleted.
 
 **Consequences**
-* **All earlier SAGE/GAT/camouflage numbers are from old architectures and are invalid for comparison.** Rerun every baseline on the new code. The earlier SAGE model had no BatchNorm or dropout, despite what earlier status text said.
+* **All earlier SAGE/GAT/camouflage numbers are from old architectures and are invalid for comparison.** The feature change also invalidates the LightGBM baseline run from before it, because the feature matrix changed. Rerun every baseline on the new code and graph. The earlier SAGE model had no BatchNorm or dropout, despite what earlier status text said.
 * `NeighborLoader` needs `pyg-lib` or `torch-sparse` on the training machine. Kaggle's image should have them; the local sandbox does not, so `train.py` was not run end-to-end here.
 
 **Verification (2026-10-12, CPU, torch 2.14.1, PyG 2.8.0.post1, LightGBM 4.7.0)**
-* `pytest tests/`: 16 passed (legacy layer tests, PyG model tests incl. trust-feature check, LightGBM tests, `train.py --help`).
+* `pytest tests/`: 22 passed (legacy layer tests, PyG model tests incl. trust-feature check, LightGBM tests, and 5 new `build_graph` tests: hand-computed card features, a no-look-ahead check, missing-card handling, train-only frequency encoding, and an end-to-end run on synthetic CSVs). A deliberately leaky variant of the card features fails the no-look-ahead test.
 * Full-batch sanity run on a synthetic graph: all three models train without NaN; camouflage trust gains positive for every head. **Synthetic only; not evidence about IEEE-CIS.**
 
 ## Completed Phases

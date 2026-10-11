@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import torch
 from torch_geometric.data import Data
-from sklearn.preprocessing import OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 import argparse
 
 # Configuration
@@ -26,6 +26,74 @@ RELATION_COLS = ['card1', 'card2', 'addr1', 'P_emaildomain', 'DeviceInfo']
 # total edges from capped groups by ~5x compared to 100.
 DEGREE_CAP = 20  # Max number of edges any single node can get from one relation group
 RANDOM_SEED = 42  # For reproducible sampling when capping large groups
+
+# Names of the per-card history columns produced by card_history_features.
+CARD_HISTORY_COLS = ['card_prior_count', 'card_prior_amt_mean', 'card_prior_amt_std',
+                     'card_amt_dev', 'card_log_gap']
+
+
+def card_history_features(df):
+    """
+    Label-free, look-back-only per-card features, keyed on card1.
+
+    df must already be sorted by TransactionDT. For each row, the statistics
+    use only the EARLIER rows that share its card1 value. The current row is
+    never included and no label is read, so these features cannot leak the
+    target or any later transaction.
+
+    Rows without card1, and rows where a statistic has no history yet, are NaN.
+    build_graph fills those NaNs with the train-split median like any other
+    numeric column.
+
+    Returns a DataFrame indexed like df with columns CARD_HISTORY_COLS:
+      card_prior_count     log1p(number of earlier transactions on this card)
+      card_prior_amt_mean  mean of log1p(amount) over earlier transactions
+      card_prior_amt_std   std (ddof=0) of log1p(amount) over earlier transactions
+      card_amt_dev         log1p(amount) minus card_prior_amt_mean
+      card_log_gap         log1p(seconds since the previous transaction on this card)
+    """
+    out = pd.DataFrame(np.nan, index=df.index, columns=CARD_HISTORY_COLS)
+    valid = df['card1'].notna()
+    if not valid.any():
+        return out
+
+    card = df.loc[valid, 'card1']
+    t = df.loc[valid, 'TransactionDT'].astype(float)
+    amt = np.log1p(df.loc[valid, 'TransactionAmt'].astype(float).clip(lower=0))
+
+    # Running totals within each card, minus the current row, so only earlier
+    # rows contribute. Missing amounts count as "no observation", not as zero.
+    has_amt = amt.notna().astype(float)
+    amt0 = amt.fillna(0.0)
+    n_prior = has_amt.groupby(card).cumsum() - has_amt
+    s_prior = amt0.groupby(card).cumsum() - amt0
+    sq_prior = (amt0 ** 2).groupby(card).cumsum() - amt0 ** 2
+
+    mean = (s_prior / n_prior).where(n_prior > 0)
+    var = (sq_prior / n_prior - mean ** 2).clip(lower=0)
+    gap = t.groupby(card).diff().clip(lower=0)
+
+    out.loc[valid, 'card_prior_count'] = np.log1p(card.groupby(card).cumcount())
+    out.loc[valid, 'card_prior_amt_mean'] = mean
+    out.loc[valid, 'card_prior_amt_std'] = np.sqrt(var)
+    out.loc[valid, 'card_amt_dev'] = amt - mean
+    out.loc[valid, 'card_log_gap'] = np.log1p(gap)
+    return out
+
+
+def frequency_encode(series, train_end):
+    """
+    Replace each category with its share of the train split (the first
+    train_end rows, in time order). Categories not seen in train map to 0.0.
+
+    Unlike ordinal codes, this does not impose an arbitrary numeric order on
+    unordered categories. The trade-off is that two categories with the same
+    share become indistinguishable. Frequencies are computed from features
+    only, never from labels.
+    """
+    freq = series.iloc[:train_end].value_counts(normalize=True)
+    return series.map(freq).fillna(0.0).astype(float)
+
 
 def check_files(transaction_file, identity_file, raw_data_dir):
     if not os.path.exists(transaction_file) or not os.path.exists(identity_file):
@@ -56,16 +124,27 @@ def build_graph(transaction_file, identity_file, limit=None):
     y = torch.tensor(labels, dtype=torch.long)
     
     print("Processing node features...")
-    # Very basic feature processing (impute NaNs, encode categoricals, scale)
+    # Feature processing: log-scale amounts, add label-free per-card history,
+    # impute numeric NaNs with train medians, frequency-encode categoricals
+    # (train shares), then scale (train statistics). Nothing here reads labels.
     # Exclude IDs, target, and relation columns from node features
     exclude_cols = ['TransactionID', 'isFraud', 'TransactionDT', 'addr2'] + RELATION_COLS
     feature_cols = [c for c in df.columns if c not in exclude_cols]
     
     features_df = df[feature_cols].copy()
-    
-    # Identify numeric and categorical columns
-    numeric_cols = features_df.select_dtypes(include=['int64', 'float64']).columns
-    categorical_cols = features_df.select_dtypes(include=['object']).columns
+
+    # Amounts are heavy-tailed, so the model sees log(1 + amount), not raw dollars.
+    features_df['TransactionAmt'] = np.log1p(features_df['TransactionAmt'].clip(lower=0))
+
+    # Per-card history: how this transaction compares with the same card's
+    # EARLIER activity (amount deviation, spending level, time since last use).
+    features_df = pd.concat([features_df, card_history_features(df)], axis=1)
+
+    # Identify numeric and categorical columns. Numeric is any number dtype;
+    # everything else is categorical. This keeps string columns categorical
+    # under pandas >= 3, which stores them in a dedicated string dtype.
+    numeric_cols = features_df.select_dtypes(include=[np.number]).columns
+    categorical_cols = features_df.select_dtypes(exclude=[np.number]).columns
     
     train_end = int(len(df) * 0.7)
 
@@ -88,12 +167,11 @@ def build_graph(transaction_file, identity_file, limit=None):
     numeric_medians = features_df.iloc[:train_end][numeric_cols].median()
     features_df[numeric_cols] = features_df[numeric_cols].fillna(numeric_medians)
     
-    # Encode categorical
-    features_df[categorical_cols] = features_df[categorical_cols].fillna('MISSING')
-    encoder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
-    if len(categorical_cols) > 0:
-        encoder.fit(features_df.iloc[:train_end][categorical_cols])
-        features_df[categorical_cols] = encoder.transform(features_df[categorical_cols])
+    # Encode categoricals as train-split frequencies, not ordinal codes.
+    # Ordinal codes give unordered categories an arbitrary numeric order,
+    # which the scaler then treats as magnitude.
+    for col in categorical_cols:
+        features_df[col] = frequency_encode(features_df[col].fillna('MISSING'), train_end)
     
     # Scale features
     scaler = StandardScaler()
