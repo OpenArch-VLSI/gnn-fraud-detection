@@ -13,7 +13,8 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.models import FraudGAT, FraudCamouflageGNN, GraphSAGEModel
-from src.utils.metrics import compute_metrics
+from src.utils.losses import pairwise_auc_loss, smooth_ap_loss
+from src.utils.metrics import compute_metrics, selection_score
 from src.utils.seed import set_seed
 from torch_geometric.loader import NeighborLoader
 
@@ -38,10 +39,26 @@ def build_parser(suppress_defaults=False):
     parser.add_argument('--run_name', type=str, default=d if suppress_defaults else None)
     parser.add_argument('--patience', type=int,
                          default=d if suppress_defaults else 10,
-                         help="Stop training early if validation PR-AUC "
-                              "hasn't improved for this many consecutive "
-                              "epochs. Set to 0 to disable early stopping "
-                              "and always run the full --epochs count.")
+                         help="Stop training early if the validation score "
+                              "(mean of PR-AUC and ROC-AUC) hasn't improved "
+                              "for this many consecutive epochs. Set to 0 to "
+                              "disable early stopping and always run the "
+                              "full --epochs count.")
+    parser.add_argument('--rank_loss_weight', type=float,
+                         default=d if suppress_defaults else 1.0,
+                         help="Weight of the pairwise ROC-AUC surrogate "
+                              "(src/utils/losses.py) added to the BCE loss. "
+                              "0 removes the term.")
+    parser.add_argument('--ap_loss_weight', type=float,
+                         default=d if suppress_defaults else 1.0,
+                         help="Weight of the smooth average-precision "
+                              "(PR-AUC) surrogate added to the BCE loss. "
+                              "0 removes the term.")
+    parser.add_argument('--ap_temperature', type=float,
+                         default=d if suppress_defaults else 1.0,
+                         help="Sigmoid temperature of the smooth-AP surrogate, "
+                              "in logit units. Smaller values track exact AP "
+                              "more closely but give sparser gradients.")
     parser.add_argument('--resume_dir', type=str, default=d if suppress_defaults else None,
                          help="Path to a mounted previous exp_dir (e.g. "
                               "/kaggle/input/<slug>/experiments/<run_name>) "
@@ -96,8 +113,12 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     load_state_dict either error out with a confusing shape-mismatch, or in
     rarer cases silently misload weights into the wrong-shaped tensors.
     """
-    # Fields that affect model architecture for every model type.
-    always_checked = ['model', 'hidden_channels']
+    # Fields that affect model architecture for every model type. The loss
+    # weights are checked too: a resumed run must keep the same objective.
+    # Checkpoints from before these fields existed have None for them and
+    # are refused, rather than resumed with a silently different objective.
+    always_checked = ['model', 'hidden_channels', 'rank_loss_weight',
+                      'ap_loss_weight', 'ap_temperature']
     # Fields that only apply to gat/camouflage -- sage's GraphSAGEModel
     # constructor (see models.py / train.py's instantiation branch) only
     # takes (in_channels, hidden_channels), no heads/dropout.
@@ -119,9 +140,30 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
         raise ValueError(
             "Cannot resume: the following config fields differ between the "
             "checkpoint being resumed and this run's config, which would "
-            "make load_state_dict error or silently misload:\n"
+            "make load_state_dict error, silently misload weights, or "
+            "switch the training objective mid-run:\n"
             + "\n".join(mismatches)
         )
+
+def training_objective(criterion, seed_logits, seed_labels, config):
+    """
+    Loss for one mini-batch, computed on its seed nodes only.
+
+    Weighted BCE is the base term: it keeps the logits calibrated and trains
+    every seed. On top of it, two surrogates push the batch ranking towards
+    the two metrics that checkpoint selection uses (src/utils/losses.py): a
+    pairwise ROC-AUC term and a smooth average-precision (PR-AUC) term.
+    Setting a weight to 0 drops that term; both at 0 gives BCE alone.
+    """
+    loss = criterion(seed_logits, seed_labels.float())
+    rank_weight = config['rank_loss_weight']
+    ap_weight = config['ap_loss_weight']
+    if rank_weight > 0:
+        loss = loss + rank_weight * pairwise_auc_loss(seed_logits, seed_labels)
+    if ap_weight > 0:
+        loss = loss + ap_weight * smooth_ap_loss(
+            seed_logits, seed_labels, temperature=config['ap_temperature'])
+    return loss
 
 def main():
     args = parse_args()
@@ -233,13 +275,14 @@ def main():
     # single block so there's exactly one place these get initialized --
     # no duplicate/conflicting initializations later in the function.
     start_epoch = 1
-    best_val_pr_auc = 0.0
+    best_val_score = 0.0
     metrics_log = []
-    # Tracks how many consecutive epochs have passed since val PR-AUC last
-    # improved. Reset to 0 every time a new best is found; if it reaches
-    # config['patience'], training stops early instead of running the full
-    # --epochs count. This avoids burning GPU hours on epochs that aren't
-    # actually helping once the model has plateaued.
+    # Tracks how many consecutive epochs have passed since the val score
+    # (selection_score: mean of PR-AUC and ROC-AUC) last improved. Reset to
+    # 0 every time a new best is found. If it reaches config['patience'],
+    # training stops early instead of running the full --epochs count. This
+    # avoids burning GPU hours on epochs that aren't actually helping once
+    # the model has plateaued.
     epochs_without_improvement = 0
     patience = config.get('patience', 10)
 
@@ -254,7 +297,7 @@ def main():
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch'] + 1
-        best_val_pr_auc = checkpoint.get('best_val_pr_auc', 0.0)
+        best_val_score = checkpoint.get('best_val_score', 0.0)
         epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
 
         # Reload prior epoch-by-epoch history so the new version's
@@ -267,7 +310,7 @@ def main():
                 metrics_log = json.load(f)
 
         print(f"Resuming from epoch {start_epoch} "
-              f"(best_val_pr_auc so far: {best_val_pr_auc:.4f}, "
+              f"(best_val_score so far: {best_val_score:.4f}, "
               f"epochs_without_improvement: {epochs_without_improvement})")
 
     for epoch in range(start_epoch, config['epochs'] + 1):
@@ -278,7 +321,9 @@ def main():
             batch = batch.to(device)
             optimizer.zero_grad()
             out = model(batch.x, batch.edge_index).squeeze(-1)
-            loss = criterion(out[:batch.batch_size], batch.y[:batch.batch_size].float())
+            seed_logits = out[:batch.batch_size]
+            seed_labels = batch.y[:batch.batch_size]
+            loss = training_objective(criterion, seed_logits, seed_labels, config)
 
             if is_camouflage_model:
                 # Only the seed nodes (the first batch_size nodes in a
@@ -323,7 +368,8 @@ def main():
             for batch in val_loader:
                 batch = batch.to(device)
                 out = model(batch.x, batch.edge_index).squeeze(-1)
-                loss = criterion(out[:batch.batch_size], batch.y[:batch.batch_size].float())
+                loss = training_objective(criterion, out[:batch.batch_size],
+                                          batch.y[:batch.batch_size], config)
                 val_loss += loss.item()
                 val_batches += 1
                 all_preds.append(out[:batch.batch_size])
@@ -333,17 +379,20 @@ def main():
         all_preds = torch.cat(all_preds)
         all_labels = torch.cat(all_labels)
         val_metrics = compute_metrics(all_preds, all_labels)
+        val_score = selection_score(val_metrics)
 
         log_str = (f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | "
                    f"Val Loss: {avg_val_loss:.4f} | "
                    f"Val PR-AUC: {val_metrics['pr_auc']:.4f} | "
-                   f"Val ROC-AUC: {val_metrics['roc_auc']:.4f}")
+                   f"Val ROC-AUC: {val_metrics['roc_auc']:.4f} | "
+                   f"Val score: {val_score:.4f}")
         print(log_str)
 
         metrics_log.append({
             'epoch': epoch,
             'train_loss': avg_train_loss,
             'val_loss': avg_val_loss,
+            'val_score': val_score,
             **val_metrics
         })
 
@@ -354,13 +403,13 @@ def main():
         with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
             json.dump(metrics_log, f, indent=4)
 
-        if val_metrics['pr_auc'] > best_val_pr_auc:
-            best_val_pr_auc = val_metrics['pr_auc']
+        if val_score > best_val_score:
+            best_val_score = val_score
             torch.save({
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
-                'best_val_pr_auc': best_val_pr_auc,
+                'best_val_score': best_val_score,
             }, os.path.join(exp_dir, 'best_model.pt'))
             print("  --> Saved new best model")
             epochs_without_improvement = 0
@@ -379,7 +428,7 @@ def main():
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
-            'best_val_pr_auc': best_val_pr_auc,
+            'best_val_score': best_val_score,
             'epochs_without_improvement': epochs_without_improvement,
         }, os.path.join(exp_dir, 'last_model.pt'))
 
@@ -387,8 +436,9 @@ def main():
             # patience == 0 means early stopping is disabled entirely --
             # always run the full requested number of epochs.
             if patience > 0 and epochs_without_improvement >= patience:
-                print(f"  --> No val PR-AUC improvement for {patience} "
-                      f"consecutive epochs (best so far: {best_val_pr_auc:.4f} "
+                print(f"  --> No improvement in val score (mean PR-AUC/ROC-AUC) "
+                      f"for {patience} consecutive epochs "
+                      f"(best so far: {best_val_score:.4f} "
                       f"at an earlier epoch). Stopping early at epoch {epoch}/"
                       f"{config['epochs']}.")
                 break

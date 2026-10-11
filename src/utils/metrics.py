@@ -31,3 +31,12 @@ def compute_metrics(logits: torch.Tensor, targets: torch.Tensor) -> dict:
         'f1': f1,
         'recall': recall,
     }
+
+
+def selection_score(metrics: dict) -> float:
+    """
+    Score used to pick the best checkpoint and to drive early stopping: the
+    mean of validation PR-AUC and ROC-AUC. Both are weighted equally, so
+    neither metric is treated as the headline one.
+    """
+    return 0.5 * (metrics['pr_auc'] + metrics['roc_auc'])
