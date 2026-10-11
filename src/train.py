@@ -282,8 +282,14 @@ def main():
             loss = criterion(out[:batch.batch_size], batch.y[:batch.batch_size].float())
 
             if is_camouflage_model:
-                node_scores = model.auxiliary_node_scores()
-                aux_loss = criterion(node_scores, batch.y.float())
+                # Only the seed nodes (the first batch_size nodes in a
+                # NeighborLoader batch) are train-split nodes. NeighborLoader
+                # also samples neighbors from the whole graph, which can
+                # include validation/test nodes; their labels must not
+                # supervise score_head, so the auxiliary loss is restricted
+                # to the same seeds as the main loss.
+                node_scores = model.auxiliary_node_scores()[:batch.batch_size]
+                aux_loss = criterion(node_scores, batch.y[:batch.batch_size].float())
                 loss = loss + aux_loss_weight * aux_loss
 
             loss.backward()

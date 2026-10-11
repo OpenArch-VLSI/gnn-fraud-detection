@@ -57,3 +57,9 @@ Thumbs.db
 !experiments/sage_baseline/last_model.pt
 !experiments/gat_baseline/best_model.pt
 !experiments/gat_baseline/last_model.pt
+# Camouflage-GAT run results (tracked like the SAGE/GAT baselines)
+!experiments/camo_gat_baseline/
+!experiments/camo_gat_baseline/best_model.pt
+!experiments/camo_gat_baseline/last_model.pt
+!experiments/camo_gat_baseline/metrics.json
+!experiments/camo_gat_baseline/config.json

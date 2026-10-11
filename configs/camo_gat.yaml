@@ -5,4 +5,7 @@ hidden_channels: 64
 heads: 4
 dropout: 0.3
 seed: 42
+# Weight on the auxiliary loss that supervises score_head (train.py).
+# Recorded here so it appears in config.json; not yet tuned.
+aux_loss_weight: 0.3
 run_name: "camo_gat_baseline"

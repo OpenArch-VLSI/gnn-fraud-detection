@@ -30,8 +30,12 @@ def load_graph_and_model():
     
     print("Loading model...")
     model = FraudCamouflageGNN(data.x.size(1), 64, heads=4, dropout=0.3).to(device)
-    model_path = os.path.join('experiments', 'camo_gat', 'best_model.pt')
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    # Run name matches configs/camo_gat.yaml. train.py saves a checkpoint
+    # dict ({'model': ..., 'optimizer': ..., ...}), so unwrap the 'model' key
+    # (same fix as evaluate.py).
+    model_path = os.path.join('experiments', 'camo_gat_baseline', 'best_model.pt')
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model'])
     model.eval()
     
     return data, model

@@ -35,7 +35,10 @@
 * **Phase 7 (Design & implement the novel module):**
   * Camouflage GAT module implemented (`src/models/layers/camouflage_gat.py`), using a label-supervised score-agreement trust signal (following the CARE-GNN approach, Dou et al. 2020) rather than raw feature similarity, specifically to resist fraud rings that deliberately shape features to look legitimate.
   * Unit tests written and passing (`tests/test_camouflage.py`).
-  * **[Noted, not yet fixed]** `CamouflageGATConv` has a second, additive instability risk beyond what the Phase 5 gradient-clipping fix addresses: `trust = torch.exp(-score_diff)` is a second, unbounded exponential stacked on top of the attention softmax's own exponential, fed by an untrained `score_head` early in training. Gradient clipping should help but has not been confirmed sufficient specifically for this term, since camouflage-GAT has not been trained yet.
+  * **[Corrected 2026-10-12]** The previously noted "unbounded exponential" risk does not exist. `trust = torch.exp(-score_diff)` with `score_diff = |s_src - s_dst| >= 0` lies in (0, 1], so it cannot explode; at worst it underflows toward 0 for very large disagreements. Nothing here needs fixing for this reason.
+  * **[Fixed 2026-10-12, not yet verified by a run]** Label leak in the auxiliary loss (`src/train.py`): `aux_loss` was computed over every node in the NeighborLoader batch, including sampled neighbors that can be validation or test nodes, so their labels supervised `score_head`. It is now restricted to the seed nodes (`[:batch.batch_size]`), matching the main loss. No camouflage-GAT result existed before this fix, so no reported number was affected.
+  * **[Known design choice, not changed]** Self-loop edges always receive trust = exp(0) = 1, the maximum bonus, so each node is favored over neighbors whose predicted scores disagree. This may suppress the neighborhood signal the mechanism is meant to filter. Left as-is for the first run; candidate for an ablation.
+  * **[Fixed 2026-10-12, not yet verified by a run]** `tests/test_camouflage.py` referenced `sim_weight`, which the layer no longer defines, so `test_camouflage_gradient_flow` and `test_camouflage_behavior` raised `AttributeError`. `test_camouflage_behavior` also tested the abandoned cosine-similarity mechanism. Both now test the score-agreement trust term. The earlier claim "unit tests passing" was incorrect.
 
 ## Kaggle Training Runs Completed To Date
 * **SAGE baseline (`sage_baseline.yaml`):** trained twice.
@@ -46,9 +49,15 @@
   * Second attempt: genuine GAT run at `lr: 0.005` (unmodified default), exhibited severe training instability — sharp single-epoch collapses (e.g. ROC-AUC dropping to ~0.54-0.59 in isolated epochs), best PR-AUC only 0.1478, well below SAGE. Diagnosed as caused by absent gradient clipping combined with an aggressive learning rate for an attention-based architecture.
   * Third attempt (post gradient-clipping + `lr: 0.001` fix, pre-NaN-imputation-fix): stable training, no collapses, best PR-AUC 0.3157 / ROC-AUC 0.8103 at epoch 6, early-stopped at epoch 16. Verified via direct checkpoint inspection (`torch.load` + epoch/PR-AUC cross-check against logs). Results committed to `experiments/gat_baseline/`.
   * **Not yet rerun against the NaN-imputation fix** — the committed GAT result above predates that fix, unlike the current SAGE result. This is an inconsistency that should be resolved before treating the two as a fair comparison (see Missing Tasks).
-* **Camouflage-GAT (`camo_gat.yaml`):** not yet trained. Config still has `lr: 0.005` (the same value that caused GAT's instability) and has not been lowered yet, despite this being flagged as needed.
+* **Camouflage-GAT (`camo_gat.yaml`):** not yet trained. **[Corrected 2026-10-12]** Config is already at `lr: 0.001`, and `aux_loss_weight: 0.3` is now written explicitly into the YAML so it is recorded in `config.json`. Previously it was only a hardcoded default in `train.py`.
 
 ## Missing / Incomplete Tasks
+* **Cleanup pending (owner action):**
+  * `report/_archive/` still contains `final_report_FABRICATED_2026-08-26.md` and `results_FABRICATED_2026-08-26.md`. Their 3-seed numbers (e.g. camouflage PR-AUC 0.3907 ± 0.0144) do not correspond to any run in this repo; `run_experiments.py` has never completed end-to-end. Delete this folder. Do not cite any number from it. (The deletion was not performed from the working session.)
+  * `src/agent.py` is outside the roadmap. Fixed on 2026-10-12 to use the `camo_gat_baseline` checkpoint path and to unwrap the checkpoint's `'model'` key. Not tested (needs `GOOGLE_API_KEY` and a trained camouflage checkpoint). Keep or remove; decide and document.
+  * `report/related_work.md` twist paragraph rewritten on 2026-10-12 to describe score-agreement gating rather than cosine similarity.
+  * Metrics: `recall` added to `compute_metrics`; `run_experiments.py` now reports sample std (ddof=1).
+  * `train.py` default fanout is `[25, 10]`; the roadmap and earlier status text say `[15, 15]`. Use the real value in the report.
 * **Phase 8 (Experiments & ablations) — in progress, not complete:**
   * Rerun GAT baseline against the NaN-imputation-corrected graph, so SAGE and GAT results are directly comparable (both post-fix). Currently only SAGE has been re-run since that fix.
   * Update `configs/camo_gat.yaml`'s learning rate from 0.005 to 0.001, matching the GAT fix, before training camouflage-GAT.
