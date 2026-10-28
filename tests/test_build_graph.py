@@ -84,6 +84,42 @@ def test_frequency_encoding_uses_train_split_only():
     np.testing.assert_allclose(out.to_numpy(), [0.75, 0.75, 0.25, 0.75, 0.0])
 
 
+def _relation_frame(values):
+    return pd.DataFrame({'card1': np.asarray(values, dtype=float)})
+
+
+def _edge_set(ei):
+    return set(zip(ei[0].tolist(), ei[1].tolist()))
+
+
+def test_causal_edges_point_from_earlier_to_later(monkeypatch):
+    monkeypatch.setattr(bg, 'DEGREE_CAP', 20)
+    # Rows 0, 2 and 5 share a value. Causal links: 0->2, 0->5, 2->5.
+    df = _relation_frame([1, np.nan, 1, np.nan, np.nan, 1])
+    ei = bg.relation_edges(df, 'card1', causal=True, rng=np.random.default_rng(0))
+    assert _edge_set(ei) == {(0, 2), (0, 5), (2, 5)}
+
+
+def test_full_edges_link_both_directions_in_small_groups(monkeypatch):
+    monkeypatch.setattr(bg, 'DEGREE_CAP', 20)
+    df = _relation_frame([1, 1, 1])
+    ei = bg.relation_edges(df, 'card1', causal=False, rng=np.random.default_rng(0))
+    assert _edge_set(ei) == {(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)}
+
+
+def test_causal_in_degree_is_capped(monkeypatch):
+    monkeypatch.setattr(bg, 'DEGREE_CAP', 3)
+    df = _relation_frame(np.ones(30))
+    ei = bg.relation_edges(df, 'card1', causal=True, rng=np.random.default_rng(0))
+    src, dst = ei[0].numpy(), ei[1].numpy()
+
+    assert (src < dst).all()                 # earlier -> later only
+    in_deg = np.bincount(dst, minlength=30)
+    assert in_deg.max() <= 3                 # cap respected
+    assert in_deg[0] == 0                    # first transaction has no earlier partner
+    assert in_deg[1:].min() >= 1             # every later transaction has at least one
+
+
 def _write_synthetic_ieee(tmp_path, n=40, seed=0):
     rng = np.random.default_rng(seed)
     tx = pd.DataFrame({
@@ -111,21 +147,35 @@ def _write_synthetic_ieee(tmp_path, n=40, seed=0):
     return tx_path, id_path
 
 
-def test_build_graph_end_to_end_on_synthetic_csvs(tmp_path, monkeypatch):
+def test_build_writes_causal_and_full_graphs_on_synthetic_csvs(tmp_path, monkeypatch):
     tx_path, id_path = _write_synthetic_ieee(tmp_path)
     out_dir = tmp_path / 'processed'
     monkeypatch.setattr(bg, 'PROCESSED_DATA_DIR', str(out_dir))
-    monkeypatch.setattr(bg, 'OUTPUT_FILE', str(out_dir / 'graph.pt'))
 
-    bg.build_graph(str(tx_path), str(id_path))
-    data = torch.load(out_dir / 'graph.pt', weights_only=False)
+    bg.build(str(tx_path), str(id_path))
 
-    # Features: TransactionAmt, V1 (numeric) + 5 card-history columns,
-    # plus ProductCD and DeviceType (categorical, frequency-encoded).
-    # Excluded: IDs, label, time, addr2, and the relation columns.
-    assert data.num_nodes == 40
-    assert data.x.shape == (40, 9)
-    assert torch.isfinite(data.x).all()
-    assert data.edge_index.shape[0] == 2 and data.edge_index.shape[1] > 0
-    assert (data.train_mask | data.val_mask | data.test_mask).all()
-    assert not (data.train_mask & data.test_mask).any()
+    causal = torch.load(out_dir / 'graph_causal.pt', weights_only=False)
+    full = torch.load(out_dir / 'graph_full.pt', weights_only=False)
+
+    assert causal.graph_mode == 'causal'
+    assert full.graph_mode == 'full'
+    assert causal.num_nodes == 40 and full.num_nodes == 40
+
+    # Node features: TransactionAmt, ProductCD, V1, DeviceType (4),
+    # hour of day (1), five relation frequencies (5), five card-history columns (5) = 15.
+    assert causal.x.shape == (40, 15)
+    assert torch.isfinite(causal.x).all()
+    # Both graphs share the same node features.
+    assert torch.equal(causal.x, full.x)
+
+    # Causal graph: every edge goes from an earlier row to a later row.
+    assert causal.edge_index.size(1) > 0
+    assert (causal.edge_index[0] < causal.edge_index[1]).all()
+    # The full graph has at least as many edges.
+    assert full.edge_index.size(1) >= causal.edge_index.size(1)
+
+    # Time-ordered masks: 70% / 15% / 15%, disjoint, covering every row.
+    assert (causal.train_mask | causal.val_mask | causal.test_mask).all()
+    assert not (causal.train_mask & causal.test_mask).any()
+    assert causal.train_mask[:28].all()
+    assert causal.test_mask[34:].all()
