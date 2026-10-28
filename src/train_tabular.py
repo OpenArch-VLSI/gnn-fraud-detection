@@ -1,9 +1,9 @@
 """
 Non-graph reference baseline: LightGBM on the node feature matrix only.
 
-Uses the same time-based train/val/test masks as the graph models (read from
-data/processed/graph.pt), and ignores edge_index entirely. This is the
-comparison that tells us whether the graph is adding anything.
+Uses the same time-based masks and features as the graph models. Edges are
+ignored, so the causal and full graph files give the same result. Reports
+test metrics in the same format as evaluate.py.
 
 Usage:
     python src/train_tabular.py --config configs/lgbm_tabular.yaml
@@ -20,9 +20,10 @@ import yaml
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from src.utils.metrics import compute_metrics
+from src.utils.metrics import compute_metrics, budget_report
 from src.utils.seed import set_seed
 
+DEFAULT_BUDGETS = [0.01, 0.05, 0.10]
 DEFAULT_PARAMS = {
     'learning_rate': 0.05,
     'num_leaves': 63,
@@ -33,17 +34,12 @@ DEFAULT_PARAMS = {
 }
 
 
-def train_lightgbm(x, y, train_mask, val_mask, test_mask, params,
-                   num_boost_round, early_stopping_rounds, seed):
+def train_lightgbm(x, y, train_mask, val_mask, params, num_boost_round,
+                   early_stopping_rounds, seed):
     """
-    x: float array [N, F]; y: 0/1 array [N]; masks: boolean arrays [N].
-    Class imbalance is handled with scale_pos_weight = n_neg / n_pos, computed
-    on the training split only. Early stopping monitors validation PR-AUC
-    (LightGBM's 'average_precision').
-
-    Returns (booster, val_metrics, test_metrics). Metrics are computed with
-    src/utils/metrics.compute_metrics on raw logits, so they are directly
-    comparable with the graph models.
+    Trains on the training split and stops early on validation PR-AUC.
+    Class imbalance is handled with scale_pos_weight, computed on the training split.
+    Returns the booster and the best iteration count.
     """
     x_train, y_train = x[train_mask], y[train_mask]
     n_pos = int(y_train.sum())
@@ -67,28 +63,31 @@ def train_lightgbm(x, y, train_mask, val_mask, test_mask, params,
         num_boost_round=num_boost_round,
         valid_sets=[dval],
         valid_names=['val'],
-        callbacks=[lgb.early_stopping(early_stopping_rounds,
-                                      first_metric_only=True, verbose=False)],
+        callbacks=[lgb.early_stopping(early_stopping_rounds, first_metric_only=True, verbose=False)],
     )
-
     best = booster.best_iteration or booster.current_iteration()
-    val_logits = torch.tensor(booster.predict(x[val_mask], raw_score=True, num_iteration=best))
-    test_logits = torch.tensor(booster.predict(x[test_mask], raw_score=True, num_iteration=best))
-    val_metrics = compute_metrics(val_logits, torch.tensor(y[val_mask]))
-    test_metrics = compute_metrics(test_logits, torch.tensor(y[test_mask]))
-    return booster, best, val_metrics, test_metrics
+    return booster, best
 
 
 def run_experiment(x, y, masks, cfg, exp_dir):
-    """Train, then write config/metrics/model/test results to exp_dir."""
+    """Train, then write config, model, metrics and test results to exp_dir."""
     set_seed(cfg['seed'])
-    booster, best, val_metrics, test_metrics = train_lightgbm(
-        x, y, masks['train'], masks['val'], masks['test'],
+    booster, best = train_lightgbm(
+        x, y, masks['train'], masks['val'],
         params=cfg.get('params', {}),
         num_boost_round=cfg['num_boost_round'],
         early_stopping_rounds=cfg['early_stopping_rounds'],
         seed=cfg['seed'],
     )
+
+    val_logits = torch.tensor(booster.predict(x[masks['val']], raw_score=True, num_iteration=best))
+    test_logits = torch.tensor(booster.predict(x[masks['test']], raw_score=True, num_iteration=best))
+    test_labels = torch.tensor(y[masks['test']])
+    budgets = cfg.get('review_budgets', DEFAULT_BUDGETS)
+
+    val_metrics = compute_metrics(val_logits, torch.tensor(y[masks['val']]))
+    test_results = compute_metrics(test_logits, test_labels)
+    test_results['budgets'] = budget_report(val_logits, test_logits, test_labels, budgets)
 
     os.makedirs(exp_dir, exist_ok=True)
     with open(os.path.join(exp_dir, 'config.json'), 'w') as f:
@@ -97,14 +96,15 @@ def run_experiment(x, y, masks, cfg, exp_dir):
     with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
         json.dump({'best_iteration': best, 'val': val_metrics}, f, indent=4)
     with open(os.path.join(exp_dir, 'test_results.json'), 'w') as f:
-        json.dump(test_metrics, f, indent=4)
+        json.dump(test_results, f, indent=4)
 
     print(f"best_iteration={best}")
-    print(f"val : PR-AUC {val_metrics['pr_auc']:.4f}  ROC-AUC {val_metrics['roc_auc']:.4f}  "
-          f"recall {val_metrics['recall']:.4f}")
-    print(f"test: PR-AUC {test_metrics['pr_auc']:.4f}  ROC-AUC {test_metrics['roc_auc']:.4f}  "
-          f"recall {test_metrics['recall']:.4f}")
-    return test_metrics
+    print(f"validation PR-AUC {val_metrics['pr_auc']:.4f}, ROC-AUC {val_metrics['roc_auc']:.4f}")
+    print(f"test       PR-AUC {test_results['pr_auc']:.4f}, ROC-AUC {test_results['roc_auc']:.4f}")
+    for row in test_results['budgets']:
+        print(f"  budget {row['budget']:.0%}: precision {row['precision_at_budget']:.4f}, "
+              f"recall {row['recall_at_budget']:.4f}")
+    return test_results
 
 
 def main():
@@ -118,11 +118,11 @@ def main():
     cfg.setdefault('num_boost_round', 2000)
     cfg.setdefault('early_stopping_rounds', 100)
     cfg.setdefault('run_name', 'lgbm_tabular')
+    cfg.setdefault('graph', 'causal')
 
-    data_path = os.path.join('data', 'processed', 'graph.pt')
+    data_path = os.path.join('data', 'processed', f"graph_{cfg['graph']}.pt")
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Graph data not found at {data_path}. Run build_graph.py first.")
-    # Only node features, labels and masks are used; edge_index is ignored.
+        raise FileNotFoundError(f"Graph not found at {data_path}. Run src/data/build_graph.py first.")
     data = torch.load(data_path, weights_only=False)
     x = data.x.cpu().numpy()
     y = data.y.cpu().numpy()
@@ -131,10 +131,9 @@ def main():
         'val': data.val_mask.cpu().numpy(),
         'test': data.test_mask.cpu().numpy(),
     }
-    print(f"Loaded {x.shape[0]} nodes x {x.shape[1]} features (edges ignored).")
+    print(f"Loaded {x.shape[0]} transactions x {x.shape[1]} features (edges ignored).")
 
-    exp_dir = os.path.join('experiments', cfg['run_name'])
-    run_experiment(x, y, masks, cfg, exp_dir)
+    run_experiment(x, y, masks, cfg, os.path.join('experiments', cfg['run_name']))
 
 
 if __name__ == "__main__":
