@@ -19,24 +19,18 @@ __pycache__/
 .env.*
 !.env.example
 
-# Data
+# Data (anchored to repo root so src/data/ is still tracked)
 /data/
-!data/.gitkeep
 
-# Experiments & Logs
-experiments/*
-!experiments/sage_baseline/
-!experiments/gat_baseline/
-experiments/sage_baseline/*
-experiments/gat_baseline/*
-!experiments/sage_baseline/best_model.pt
-!experiments/sage_baseline/last_model.pt
-!experiments/sage_baseline/metrics.json
-!experiments/sage_baseline/config.json
-!experiments/gat_baseline/best_model.pt
-!experiments/gat_baseline/last_model.pt
-!experiments/gat_baseline/metrics.json
-!experiments/gat_baseline/config.json
+# Local archives, such as the Kaggle upload zip
+/*.zip
+
+# Experiments: keep metrics, configs and test results; never commit checkpoints
+experiments/**/*.pt
+experiments/**/*.pth
+experiments/**/*.ckpt
+
+# Logs
 *.log
 
 # Documentation
@@ -47,22 +41,9 @@ Docs/private_docs/
 .DS_Store
 Thumbs.db
 
-# Models
+# Model files anywhere else in the repo
 *.pt
 *.pth
 *.ckpt
 *.h5
 *.pb
-!experiments/sage_baseline/best_model.pt
-!experiments/sage_baseline/last_model.pt
-!experiments/gat_baseline/best_model.pt
-!experiments/gat_baseline/last_model.pt
-# Camouflage-GAT run results (tracked like the SAGE/GAT baselines)
-!experiments/camo_gat_baseline/
-!experiments/camo_gat_baseline/best_model.pt
-!experiments/camo_gat_baseline/last_model.pt
-!experiments/camo_gat_baseline/metrics.json
-!experiments/camo_gat_baseline/config.json
-
-# LightGBM tabular baseline results (no graph)
-!experiments/lgbm_tabular/
