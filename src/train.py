@@ -1,35 +1,41 @@
 import os
 import argparse
-import yaml
+import json
+import sys
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import time
-import json
-from datetime import datetime
+import yaml
+from torch_geometric.loader import NeighborLoader
 
-# Adjust path so we can run from anywhere
-import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.models import FraudGAT, FraudCamouflageGNN, GraphSAGEModel
 from src.utils.losses import pairwise_auc_loss, smooth_ap_loss
 from src.utils.metrics import compute_metrics, selection_score
 from src.utils.seed import set_seed
-from torch_geometric.loader import NeighborLoader
+
+FANOUT = [25, 10]          # neighbours sampled per hop; evaluate.py uses the same
+VAL_SAMPLE_SEED = 0        # fixed so validation scores are repeatable across epochs
+SELECTION_METRIC = 'pr_auc'
+GRAPH_CHOICES = ['causal', 'full']
+
 
 def build_parser(suppress_defaults=False):
     """
-    When suppress_defaults=True, omits `default=` for every flag except
-    --config, so parse_args() only returns keys the user actually typed
-    on the command line. Used to distinguish "explicitly passed" from
-    "argparse filled in its own default" -- see load_config().
+    With suppress_defaults=True no defaults are set, so parse_args() returns
+    only the flags the user actually typed. load_config() uses this to tell
+    explicit flags apart from argparse's own defaults.
     """
     d = argparse.SUPPRESS if suppress_defaults else None
-    parser = argparse.ArgumentParser(description="Train Fraud Detection GNN")
+    parser = argparse.ArgumentParser(description="Train fraud detection GNN")
     parser.add_argument('--config', type=str, help="Path to config YAML file")
     parser.add_argument('--model', type=str, choices=['sage', 'gat', 'camouflage'],
-                         default=d if suppress_defaults else 'sage')
+                        default=d if suppress_defaults else 'sage')
+    parser.add_argument('--graph', type=str, choices=GRAPH_CHOICES,
+                        default=d if suppress_defaults else 'causal')
     parser.add_argument('--epochs', type=int, default=d if suppress_defaults else 100)
     parser.add_argument('--lr', type=float, default=d if suppress_defaults else 0.01)
     parser.add_argument('--hidden_channels', type=int, default=d if suppress_defaults else 64)
@@ -37,286 +43,179 @@ def build_parser(suppress_defaults=False):
     parser.add_argument('--dropout', type=float, default=d if suppress_defaults else 0.3)
     parser.add_argument('--seed', type=int, default=d if suppress_defaults else 42)
     parser.add_argument('--run_name', type=str, default=d if suppress_defaults else None)
-    parser.add_argument('--patience', type=int,
-                         default=d if suppress_defaults else 10,
-                         help="Stop training early if the validation score "
-                              "(mean of PR-AUC and ROC-AUC) hasn't improved "
-                              "for this many consecutive epochs. Set to 0 to "
-                              "disable early stopping and always run the "
-                              "full --epochs count.")
-    parser.add_argument('--rank_loss_weight', type=float,
-                         default=d if suppress_defaults else 1.0,
-                         help="Weight of the pairwise ROC-AUC surrogate "
-                              "(src/utils/losses.py) added to the BCE loss. "
-                              "0 removes the term.")
-    parser.add_argument('--ap_loss_weight', type=float,
-                         default=d if suppress_defaults else 1.0,
-                         help="Weight of the smooth average-precision "
-                              "(PR-AUC) surrogate added to the BCE loss. "
-                              "0 removes the term.")
-    parser.add_argument('--ap_temperature', type=float,
-                         default=d if suppress_defaults else 1.0,
-                         help="Sigmoid temperature of the smooth-AP surrogate, "
-                              "in logit units. Smaller values track exact AP "
-                              "more closely but give sparser gradients.")
+    parser.add_argument('--patience', type=int, default=d if suppress_defaults else 10,
+                        help="Stop if validation PR-AUC has not improved for this many epochs. "
+                             "0 disables early stopping.")
+    parser.add_argument('--rank_loss_weight', type=float, default=d if suppress_defaults else 1.0,
+                        help="Weight of the pairwise ROC-AUC surrogate. 0 removes the term.")
+    parser.add_argument('--ap_loss_weight', type=float, default=d if suppress_defaults else 1.0,
+                        help="Weight of the smooth average-precision surrogate. 0 removes the term.")
+    parser.add_argument('--ap_temperature', type=float, default=d if suppress_defaults else 1.0,
+                        help="Sigmoid temperature of the smooth-AP surrogate, in logit units.")
     parser.add_argument('--resume_dir', type=str, default=d if suppress_defaults else None,
-                         help="Path to a mounted previous exp_dir (e.g. "
-                              "/kaggle/input/<slug>/experiments/<run_name>) "
-                              "containing last_model.pt, metrics.json, and "
-                              "config.json to resume from. If omitted, "
-                              "starts training from scratch.")
+                        help="Previous exp_dir containing last_model.pt, metrics.json and config.json.")
     return parser
 
-def parse_args():
-    return build_parser().parse_args()
 
 def load_config(args):
-    # Determine which flags the user actually typed on the CLI (as opposed
-    # to argparse filling in a default) by re-parsing sys.argv with a
-    # parser that has no defaults at all except --config. Any key present
-    # in this second parse was explicitly passed; anything absent was not
-    # -- this is unambiguous even if the explicit value happens to equal
-    # the normal parser's default (e.g. explicitly passing --lr 0.01 when
-    # 0.01 is also the argparse default for --lr).
-    explicit_args = vars(build_parser(suppress_defaults=True).parse_args())
+    explicit = vars(build_parser(suppress_defaults=True).parse_args())
+    explicit.pop('config', None)
+    defaults = {a.dest: a.default for a in build_parser()._actions
+                if a.dest not in ('help', 'config')}
 
-    parser_defaults = {action.dest: action.default
-                        for action in build_parser()._actions
-                        if action.dest != 'help'}
-
-    config = parser_defaults.copy()
-    if args.config and os.path.exists(args.config):
+    config = dict(defaults)
+    if args.config:
+        if not os.path.exists(args.config):
+            raise FileNotFoundError(f"Config file not found: {args.config}")
         with open(args.config, 'r') as f:
-            yaml_config = yaml.safe_load(f)
-            config.update(yaml_config)
+            config.update(yaml.safe_load(f) or {})
+    config.update(explicit)
 
-    # Only CLI args the user actually typed override the YAML.
-    config.update(explicit_args)
+    if config['graph'] not in GRAPH_CHOICES:
+        raise ValueError(f"graph must be one of {GRAPH_CHOICES}, got {config['graph']!r}")
+    if config.get('selection_metric', SELECTION_METRIC) != SELECTION_METRIC:
+        raise ValueError(f"selection_metric must be '{SELECTION_METRIC}', "
+                         f"got {config.get('selection_metric')!r}")
+    config['selection_metric'] = SELECTION_METRIC
 
     if config.get('run_name') is None:
-        config['run_name'] = f"{config['model']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    # DEBUG: print the resolved config and exp_dir so it's immediately
-    # visible in the logs which model/hyperparameters this run is
-    # actually using, rather than only discoverable after the fact.
-    print("=== DEBUG: resolved config ===")
-    print(json.dumps(config, indent=2))
-    print(f"=== DEBUG: exp_dir will be: {os.path.join('experiments', config['run_name'])} ===")
-
+        config['run_name'] = f"{config['model']}_{config['graph']}_" \
+                             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     return config
+
 
 def validate_resume_config(old_config: dict, new_config: dict) -> None:
     """
-    Raises ValueError if new_config's model-defining fields don't match
-    old_config's. Without this check, resuming with a mismatched --model,
-    --hidden_channels, or --heads/--dropout (for gat/camouflage) would make
-    load_state_dict either error out with a confusing shape-mismatch, or in
-    rarer cases silently misload weights into the wrong-shaped tensors.
+    Refuses to resume if a model-defining or objective-defining field differs.
+    Checkpoints written before a field existed have None for it and are refused.
     """
-    # Fields that affect model architecture for every model type. The loss
-    # weights are checked too: a resumed run must keep the same objective.
-    # Checkpoints from before these fields existed have None for them and
-    # are refused, rather than resumed with a silently different objective.
-    always_checked = ['model', 'hidden_channels', 'rank_loss_weight',
-                      'ap_loss_weight', 'ap_temperature']
-    # Fields that only apply to gat/camouflage -- sage's GraphSAGEModel
-    # constructor (see models.py / train.py's instantiation branch) only
-    # takes (in_channels, hidden_channels), no heads/dropout.
+    always_checked = ['model', 'graph', 'hidden_channels', 'rank_loss_weight',
+                      'ap_loss_weight', 'ap_temperature', 'selection_metric']
     conditional_checked = ['heads', 'dropout']
 
-    mismatches = []
-    for key in always_checked:
-        if old_config.get(key) != new_config.get(key):
-            mismatches.append(
-                f"  {key}: old={old_config.get(key)!r} vs new={new_config.get(key)!r}")
-
+    keys = list(always_checked)
     if new_config['model'] in ('gat', 'camouflage'):
-        for key in conditional_checked:
-            if old_config.get(key) != new_config.get(key):
-                mismatches.append(
-                    f"  {key}: old={old_config.get(key)!r} vs new={new_config.get(key)!r}")
+        keys += conditional_checked
 
+    mismatches = [f"  {k}: old={old_config.get(k)!r} vs new={new_config.get(k)!r}"
+                  for k in keys if old_config.get(k) != new_config.get(k)]
     if mismatches:
-        raise ValueError(
-            "Cannot resume: the following config fields differ between the "
-            "checkpoint being resumed and this run's config, which would "
-            "make load_state_dict error, silently misload weights, or "
-            "switch the training objective mid-run:\n"
-            + "\n".join(mismatches)
-        )
+        raise ValueError("Cannot resume: these config fields differ from the checkpoint:\n"
+                         + "\n".join(mismatches))
+
 
 def training_objective(criterion, seed_logits, seed_labels, config):
-    """
-    Loss for one mini-batch, computed on its seed nodes only.
-
-    Weighted BCE is the base term: it keeps the logits calibrated and trains
-    every seed. On top of it, two surrogates push the batch ranking towards
-    the two metrics that checkpoint selection uses (src/utils/losses.py): a
-    pairwise ROC-AUC term and a smooth average-precision (PR-AUC) term.
-    Setting a weight to 0 drops that term; both at 0 gives BCE alone.
-    """
+    """Weighted BCE on the seed nodes, plus optional pairwise-ROC and smooth-PR surrogates."""
     loss = criterion(seed_logits, seed_labels.float())
-    rank_weight = config['rank_loss_weight']
-    ap_weight = config['ap_loss_weight']
-    if rank_weight > 0:
-        loss = loss + rank_weight * pairwise_auc_loss(seed_logits, seed_labels)
-    if ap_weight > 0:
-        loss = loss + ap_weight * smooth_ap_loss(
+    if config['rank_loss_weight'] > 0:
+        loss = loss + config['rank_loss_weight'] * pairwise_auc_loss(seed_logits, seed_labels)
+    if config['ap_loss_weight'] > 0:
+        loss = loss + config['ap_loss_weight'] * smooth_ap_loss(
             seed_logits, seed_labels, temperature=config['ap_temperature'])
     return loss
 
+
+@torch.no_grad()
+def validate(model, val_loader, criterion, config, device):
+    """Validation with repeatable neighbour sampling. fork_rng leaves the training RNG untouched."""
+    model.eval()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(VAL_SAMPLE_SEED)
+        val_loss, n_batches = 0.0, 0
+        preds, labels = [], []
+        for batch in val_loader:
+            batch = batch.to(device)
+            out = model(batch.x, batch.edge_index).squeeze(-1)
+            seed_logits = out[:batch.batch_size]
+            seed_labels = batch.y[:batch.batch_size]
+            val_loss += training_objective(criterion, seed_logits, seed_labels, config).item()
+            n_batches += 1
+            preds.append(seed_logits.cpu())
+            labels.append(seed_labels.cpu())
+    preds = torch.cat(preds)
+    labels = torch.cat(labels)
+    return val_loss / max(1, n_batches), compute_metrics(preds, labels)
+
+
 def main():
-    args = parse_args()
+    args = build_parser().parse_args()
     config = load_config(args)
 
-    # If resuming, load the old run's config up front so we can validate
-    # architecture compatibility before doing any real work (data loading,
-    # model construction, etc.) -- fail fast rather than partway through.
-    old_config = None
     if config.get('resume_dir'):
         old_config_path = os.path.join(config['resume_dir'], 'config.json')
         if not os.path.exists(old_config_path):
-            raise FileNotFoundError(
-                f"--resume_dir given as {config['resume_dir']} but no "
-                f"config.json found there -- check the mounted input path.")
+            raise FileNotFoundError(f"--resume_dir given but no config.json in {config['resume_dir']}")
         with open(old_config_path, 'r') as f:
-            old_config = json.load(f)
-        validate_resume_config(old_config, config)
+            validate_resume_config(json.load(f), config)
 
     set_seed(config['seed'])
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Create experiment dir
     exp_dir = os.path.join('experiments', config['run_name'])
     os.makedirs(exp_dir, exist_ok=True)
     with open(os.path.join(exp_dir, 'config.json'), 'w') as f:
         json.dump(config, f, indent=4)
 
-    # Load data
-    data_path = os.path.join('data', 'processed', 'graph.pt')
+    data_path = os.path.join('data', 'processed', f"graph_{config['graph']}.pt")
     if not os.path.exists(data_path):
-        raise FileNotFoundError(f"Graph data not found at {data_path}. Run build_graph.py first.")
-    
-    # NOTE: Keep `data` on CPU here. NeighborLoader samples mini-batches from
-    # this object on the fly; moving the *entire* graph (45.5M edges + 590K
-    # feature rows) to GPU up front defeats the purpose of mini-batch/
-    # neighbor-sampled training and risks OOM on a T4. Only the sampled
-    # `batch` (already moved to `device` inside the train/val loops below)
-    # needs to live on GPU.
+        raise FileNotFoundError(f"Graph not found at {data_path}. Run src/data/build_graph.py first.")
+    # The graph stays on CPU; NeighborLoader moves sampled batches to the device.
     data = torch.load(data_path, weights_only=False)
-    print(f"Loaded graph with {data.num_nodes} nodes and {data.edge_index.size(1)} edges.")
-
+    print(f"Loaded {data_path}: {data.num_nodes} nodes, {data.edge_index.size(1)} edges.")
     in_channels = data.x.size(1)
 
-    # Instantiate model
     if config['model'] == 'sage':
         model = GraphSAGEModel(in_channels, config['hidden_channels']).to(device)
     elif config['model'] == 'gat':
-        model = FraudGAT(in_channels, config['hidden_channels'], heads=config['heads'], dropout=config['dropout']).to(device)
-    elif config['model'] == 'camouflage':
-        model = FraudCamouflageGNN(in_channels, config['hidden_channels'], heads=config['heads'], dropout=config['dropout']).to(device)
+        model = FraudGAT(in_channels, config['hidden_channels'],
+                         heads=config['heads'], dropout=config['dropout']).to(device)
     else:
-        raise ValueError("Unknown model type")
+        model = FraudCamouflageGNN(in_channels, config['hidden_channels'],
+                                   heads=config['heads'], dropout=config['dropout']).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=config['lr'], weight_decay=5e-4)
 
-    # Calculate class weights for BCE (handling class imbalance)
     train_labels = data.y[data.train_mask]
     num_pos = train_labels.sum().item()
     num_neg = len(train_labels) - num_pos
     pos_weight = torch.tensor([num_neg / (num_pos + 1e-6)], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    # For the camouflage-resistant model only: an auxiliary BCE loss trains
-    # the model's `score_head` to predict true fraud labels. Without this,
-    # the label-aware trust signal the model relies on (see models.py) would be
-    # computed from an untrained,
-    # meaningless score head -- this is what actually makes it label-aware
-    # rather than just an unsupervised, arbitrarily-initialized detour.
-    # Weighted low relative to the main loss since it's a supporting signal,
-    # not the primary training objective.
     aux_loss_weight = config.get('aux_loss_weight', 0.3)
     is_camouflage_model = (config['model'] == 'camouflage')
 
-    print("Setting up data loaders...")
-    if os.environ.get('EVAL_PLUMBING_TEST') == '1':
-        print("Warning: EVAL_PLUMBING_TEST=1. Using dummy loader for plumbing tests.")
-        from torch_geometric.data import Data
-        dummy_batch = Data(x=torch.randn(2, in_channels).to(device), 
-                           edge_index=torch.tensor([[0, 1], [1, 0]]).to(device), 
-                           y=torch.tensor([0, 1]).to(device), 
-                           batch_size=2)
-        train_loader = [dummy_batch]
-        val_loader = [dummy_batch]
-    else:
-        train_loader = NeighborLoader(
-            data,
-            num_neighbors=[25, 10],
-            batch_size=1024,
-            input_nodes=data.train_mask,
-            shuffle=True,
-            num_workers=0,
-        )
-        
-        val_loader = NeighborLoader(
-            data,
-            num_neighbors=[25, 10],
-            batch_size=2048,
-            input_nodes=data.val_mask,
-            shuffle=False,
-            num_workers=0,
-        )
+    train_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=1024,
+                                  input_nodes=data.train_mask, shuffle=True, num_workers=0)
+    val_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=2048,
+                                input_nodes=data.val_mask, shuffle=False, num_workers=0)
 
-    print("Starting training...")
-
-    # Resume state (overridden below if --resume_dir was given). Kept as a
-    # single block so there's exactly one place these get initialized --
-    # no duplicate/conflicting initializations later in the function.
     start_epoch = 1
     best_val_score = 0.0
     metrics_log = []
-    # Tracks how many consecutive epochs have passed since the val score
-    # (selection_score: mean of PR-AUC and ROC-AUC) last improved. Reset to
-    # 0 every time a new best is found. If it reaches config['patience'],
-    # training stops early instead of running the full --epochs count. This
-    # avoids burning GPU hours on epochs that aren't actually helping once
-    # the model has plateaued.
     epochs_without_improvement = 0
     patience = config.get('patience', 10)
 
     if config.get('resume_dir'):
         checkpoint_path = os.path.join(config['resume_dir'], 'last_model.pt')
         if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(
-                f"--resume_dir given as {config['resume_dir']} but no "
-                f"last_model.pt found there.")
-        print(f"Resuming from checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+            raise FileNotFoundError(f"No last_model.pt in {config['resume_dir']}")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch'] + 1
         best_val_score = checkpoint.get('best_val_score', 0.0)
         epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
-
-        # Reload prior epoch-by-epoch history so the new version's
-        # metrics.json continues the full record instead of restarting it,
-        # which would otherwise silently drop everything from the previous
-        # commit's run.
         old_metrics_path = os.path.join(config['resume_dir'], 'metrics.json')
         if os.path.exists(old_metrics_path):
             with open(old_metrics_path, 'r') as f:
                 metrics_log = json.load(f)
+        print(f"Resumed at epoch {start_epoch} (best validation PR-AUC so far: {best_val_score:.4f})")
 
-        print(f"Resuming from epoch {start_epoch} "
-              f"(best_val_score so far: {best_val_score:.4f}, "
-              f"epochs_without_improvement: {epochs_without_improvement})")
-
+    print("Starting training...")
     for epoch in range(start_epoch, config['epochs'] + 1):
         model.train()
-        total_loss = 0
-        total_batches = 0
+        total_loss, total_batches = 0.0, 0
         for batch in train_loader:
             batch = batch.to(device)
             optimizer.zero_grad()
@@ -326,127 +225,53 @@ def main():
             loss = training_objective(criterion, seed_logits, seed_labels, config)
 
             if is_camouflage_model:
-                # Only the seed nodes (the first batch_size nodes in a
-                # NeighborLoader batch) are train-split nodes. NeighborLoader
-                # also samples neighbors from the whole graph, which can
-                # include validation/test nodes; their labels must not
-                # supervise score_head, so the auxiliary loss is restricted
-                # to the same seeds as the main loss.
+                # Only train seed nodes supervise score_head, so no val/test labels reach it.
                 node_scores = model.auxiliary_node_scores()[:batch.batch_size]
-                aux_loss = criterion(node_scores, batch.y[:batch.batch_size].float())
-                loss = loss + aux_loss_weight * aux_loss
+                loss = loss + aux_loss_weight * criterion(node_scores, seed_labels.float())
 
             loss.backward()
-            # Gradient clipping: GATConv's attention mechanism computes
-            # softmax-normalized weights via exp() over learned attention
-            # logits (att_src/att_dst dotted with projected features). If a
-            # node's neighborhood contains outlier feature values (StandardScaler
-            # normalizes to mean 0/std 1 but doesn't bound tails, and raw
-            # transaction data is heavy-tailed), the resulting attention logits
-            # and their gradients can spike sharply for that batch. Without
-            # clipping, a single such batch can meaningfully perturb the whole
-            # model in one step -- this is the most likely cause of the sharp
-            # single-epoch PR-AUC/ROC-AUC collapses seen in early GAT runs
-            # (e.g. epoch 21 PR-AUC 0.148 -> epoch 22 PR-AUC 0.049). SAGE's
-            # mean-aggregation has no exponential amplification step and
-            # doesn't exhibit this. max_norm=1.0 is a standard, conservative
-            # starting point; not expected to hurt SAGE/camouflage either.
+            # GAT's exponential attention can spike on heavy-tailed inputs; clipping limits the damage.
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
             total_batches += 1
-            
-        avg_train_loss = total_loss / total_batches
+        avg_train_loss = total_loss / max(1, total_batches)
 
-        # Validation
-        model.eval()
-        val_loss = 0
-        val_batches = 0
-        all_preds = []
-        all_labels = []
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = batch.to(device)
-                out = model(batch.x, batch.edge_index).squeeze(-1)
-                loss = training_objective(criterion, out[:batch.batch_size],
-                                          batch.y[:batch.batch_size], config)
-                val_loss += loss.item()
-                val_batches += 1
-                all_preds.append(out[:batch.batch_size])
-                all_labels.append(batch.y[:batch.batch_size])
-                
-        avg_val_loss = val_loss / max(1, val_batches)
-        all_preds = torch.cat(all_preds)
-        all_labels = torch.cat(all_labels)
-        val_metrics = compute_metrics(all_preds, all_labels)
+        avg_val_loss, val_metrics = validate(model, val_loader, criterion, config, device)
         val_score = selection_score(val_metrics)
 
-        log_str = (f"Epoch {epoch:03d} | Train Loss: {avg_train_loss:.4f} | "
-                   f"Val Loss: {avg_val_loss:.4f} | "
-                   f"Val PR-AUC: {val_metrics['pr_auc']:.4f} | "
-                   f"Val ROC-AUC: {val_metrics['roc_auc']:.4f} | "
-                   f"Val score: {val_score:.4f}")
-        print(log_str)
+        print(f"Epoch {epoch:03d} | Train loss {avg_train_loss:.4f} | Val loss {avg_val_loss:.4f} | "
+              f"Val PR-AUC {val_metrics['pr_auc']:.4f} | Val ROC-AUC {val_metrics['roc_auc']:.4f}")
 
-        metrics_log.append({
-            'epoch': epoch,
-            'train_loss': avg_train_loss,
-            'val_loss': avg_val_loss,
-            'val_score': val_score,
-            **val_metrics
-        })
-
-        # Rewrite metrics.json every epoch (not just after the loop ends) so
-        # that a mid-run kill (session timeout, commit time limit, crash)
-        # still leaves the full epoch-by-epoch history on disk up to the
-        # last completed epoch, instead of losing it all.
+        metrics_log.append({'epoch': epoch, 'train_loss': avg_train_loss,
+                            'val_loss': avg_val_loss, 'val_score': val_score, **val_metrics})
         with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
             json.dump(metrics_log, f, indent=4)
 
         if val_score > best_val_score:
             best_val_score = val_score
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'epoch': epoch,
-                'best_val_score': best_val_score,
-            }, os.path.join(exp_dir, 'best_model.pt'))
-            print("  --> Saved new best model")
+            torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                        'epoch': epoch, 'best_val_score': best_val_score},
+                       os.path.join(exp_dir, 'best_model.pt'))
+            print("  --> saved new best model")
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
-        # Rolling "last epoch" checkpoint, saved every epoch regardless of
-        # whether it's a new best. Includes optimizer state, the epoch
-        # number, and early-stopping counters (not just model weights) so a
-        # killed run can be *resumed* from exactly where it left off,
-        # rather than only being usable for evaluation/fine-tuning the way
-        # a bare state_dict would be. Saved after the improvement check
-        # above so these counters reflect this epoch's outcome, not the
-        # previous epoch's.
-        torch.save({
-            'model': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch,
-            'best_val_score': best_val_score,
-            'epochs_without_improvement': epochs_without_improvement,
-        }, os.path.join(exp_dir, 'last_model.pt'))
+        torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                    'epoch': epoch, 'best_val_score': best_val_score,
+                    'epochs_without_improvement': epochs_without_improvement},
+                   os.path.join(exp_dir, 'last_model.pt'))
 
-        if epochs_without_improvement > 0:
-            # patience == 0 means early stopping is disabled entirely --
-            # always run the full requested number of epochs.
-            if patience > 0 and epochs_without_improvement >= patience:
-                print(f"  --> No improvement in val score (mean PR-AUC/ROC-AUC) "
-                      f"for {patience} consecutive epochs "
-                      f"(best so far: {best_val_score:.4f} "
-                      f"at an earlier epoch). Stopping early at epoch {epoch}/"
-                      f"{config['epochs']}.")
-                break
+        if patience > 0 and epochs_without_improvement >= patience:
+            print(f"  --> no validation PR-AUC improvement for {patience} epochs; "
+                  f"stopping at epoch {epoch}/{config['epochs']} (best {best_val_score:.4f}).")
+            break
 
-    # Save metrics
     with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
         json.dump(metrics_log, f, indent=4)
     print("Training finished.")
+
 
 if __name__ == "__main__":
     main()

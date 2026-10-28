@@ -98,10 +98,6 @@ def test_both_surrogates_give_finite_nonzero_gradients():
     assert logits.grad.abs().sum().item() > 0
 
 
-def test_selection_score_weights_pr_and_roc_equally():
-    assert selection_score({'pr_auc': 0.4, 'roc_auc': 0.9}) == pytest.approx(0.65)
-
-
 def test_resume_refuses_checkpoint_trained_under_a_different_objective():
     import src.train as T
 
