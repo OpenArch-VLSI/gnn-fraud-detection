@@ -125,41 +125,49 @@ def node_features(df, train_end):
 
 def relation_edges(df, col, causal, rng):
     """
-    Edges for one relation column.
+    Edges for one relation column. Rows are in time order, so a larger row id is a later transaction.
+
     causal=True : each transaction is linked FROM up to DEGREE_CAP earlier
                   transactions with the same value. Direction is earlier -> later.
     causal=False: all pairs in small groups; random samples in large groups, both ways.
+
+    Cost is linear in the number of edges: each node draws its neighbours by index,
+    so no group is ever compared with itself in full.
     """
     sub = df.loc[df[col].notna(), [col]]
     rows = sub.index.to_numpy()          # df row ids; increasing = time order
-    src, dst = [], []
+    src_parts, dst_parts = [], []
 
     for pos in sub.groupby(col).indices.values():
         members = rows[pos]
-        if len(members) < 2:
+        m = len(members)
+        if m < 2:
             continue
         if causal:
-            for k in range(1, len(members)):
-                earlier = members[:k]
-                if len(earlier) > DEGREE_CAP:
-                    earlier = rng.choice(earlier, size=DEGREE_CAP, replace=False)
-                src.append(earlier)
-                dst.append(np.full(len(earlier), members[k]))
-        elif len(members) <= DEGREE_CAP:
+            for k in range(1, m):
+                if k <= DEGREE_CAP:
+                    earlier = members[:k]
+                else:
+                    # Uniform sample of DEGREE_CAP distinct earlier positions.
+                    earlier = members[rng.choice(k, size=DEGREE_CAP, replace=False)]
+                src_parts.append(earlier)
+                dst_parts.append(np.full(len(earlier), members[k]))
+        elif m <= DEGREE_CAP:
             i, j = np.meshgrid(members, members)
             keep = i != j
-            src.append(i[keep])
-            dst.append(j[keep])
+            src_parts.append(i[keep])
+            dst_parts.append(j[keep])
         else:
-            for i in members:
-                others = members[members != i]
-                sampled = rng.choice(others, size=min(DEGREE_CAP, len(others)), replace=False)
-                src.append(np.full(len(sampled), i))
-                dst.append(sampled)
+            for p in range(m):
+                # Sample from the other m-1 members, skipping position p itself.
+                idx = rng.choice(m - 1, size=DEGREE_CAP, replace=False)
+                idx[idx >= p] += 1
+                src_parts.append(np.full(DEGREE_CAP, members[p]))
+                dst_parts.append(members[idx])
 
-    if not src:
+    if not src_parts:
         return torch.empty((2, 0), dtype=torch.long)
-    edges = np.vstack([np.concatenate(src), np.concatenate(dst)])
+    edges = np.vstack([np.concatenate(src_parts), np.concatenate(dst_parts)])
     return torch.tensor(edges, dtype=torch.long)
 
 
@@ -198,11 +206,11 @@ def build(transaction_file, identity_file, limit=None, modes=('causal', 'full'))
         else:
             combined = torch.empty((2, 0), dtype=torch.long)
 
+        # Per-relation edge tensors are not stored on the graph: the loader would copy
+        # them into every batch. Only the combined edge_index is used by training.
         data = Data(x=x, edge_index=combined, y=y,
                     train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
         data.graph_mode = mode
-        for col, ei in relation_ei.items():
-            setattr(data, f'edge_index_{col}', ei)
 
         path = os.path.join(PROCESSED_DATA_DIR, f'graph_{mode}.pt')
         torch.save(data, path)
