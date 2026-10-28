@@ -5,4 +5,5 @@ hidden_channels: 64
 heads: 4
 dropout: 0.3
 seed: 42
+graph: "causal"
 run_name: "gat_baseline"
