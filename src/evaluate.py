@@ -1,105 +1,108 @@
-import os
 import argparse
 import json
-import torch
+import os
 import sys
 
-# Adjust path so we can run from anywhere
+import torch
+from torch_geometric.loader import NeighborLoader
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from src.models.models import FraudGAT, FraudCamouflageGNN, GraphSAGEModel
-from src.utils.metrics import compute_metrics
-from torch_geometric.loader import NeighborLoader
+from src.utils.metrics import compute_metrics, budget_report
+
+FANOUT = [25, 10]          # same as train.py
+SAMPLE_SEED = 0            # same neighbours on every evaluation
+DEFAULT_BUDGETS = [0.01, 0.05, 0.10]
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate Fraud Detection GNN")
-    parser.add_argument('--exp_dir', type=str, required=True, help="Path to experiment directory containing best_model.pt and config.json")
+    parser = argparse.ArgumentParser(description="Evaluate a trained model on the test split")
+    parser.add_argument('--exp_dir', type=str, required=True)
+    parser.add_argument('--budgets', type=float, nargs='+', default=DEFAULT_BUDGETS,
+                        help="Review budgets as fractions, e.g. 0.01 0.05 0.10")
+    parser.add_argument('--force', action='store_true',
+                        help="Overwrite an existing test_results.json. Use only if no test "
+                             "numbers from this run have informed a decision.")
     return parser.parse_args()
+
+
+def build_model(config, in_channels):
+    hidden = config.get('hidden_channels', 64)
+    heads = config.get('heads', 4)
+    dropout = config.get('dropout', 0.3)
+    if config['model'] == 'sage':
+        return GraphSAGEModel(in_channels, hidden)
+    if config['model'] == 'gat':
+        return FraudGAT(in_channels, hidden, heads=heads, dropout=dropout)
+    if config['model'] == 'camouflage':
+        return FraudCamouflageGNN(in_channels, hidden, heads=heads, dropout=dropout)
+    raise ValueError(f"Unknown model type: {config['model']}")
+
+
+@torch.no_grad()
+def predict(model, data, mask, device):
+    """Logits and labels for the nodes in `mask`, with repeatable neighbour sampling."""
+    model.eval()
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(SAMPLE_SEED)
+        loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=2048,
+                                input_nodes=mask, shuffle=False, num_workers=0)
+        logits, labels = [], []
+        for batch in loader:
+            batch = batch.to(device)
+            out = model(batch.x, batch.edge_index).squeeze(-1)
+            logits.append(out[:batch.batch_size].cpu())
+            labels.append(batch.y[:batch.batch_size].cpu())
+    return torch.cat(logits), torch.cat(labels)
+
 
 def main():
     args = parse_args()
-    
+    out_path = os.path.join(args.exp_dir, 'test_results.json')
     config_path = os.path.join(args.exp_dir, 'config.json')
     model_path = os.path.join(args.exp_dir, 'best_model.pt')
-    
+
+    # The test split is evaluated once per run.
+    if os.path.exists(out_path) and not args.force:
+        raise FileExistsError(f"{out_path} exists. Pass --force only if no test numbers "
+                              f"from this run have informed a decision.")
     if not os.path.exists(config_path) or not os.path.exists(model_path):
         raise FileNotFoundError("Experiment directory must contain config.json and best_model.pt")
-        
+
     with open(config_path, 'r') as f:
         config = json.load(f)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # Load data
-    data_path = os.path.join('data', 'processed', 'graph.pt')
-    print(f"Loading data from {data_path}...")
-    data = torch.load(data_path, weights_only=False).to(device)
-    print("Data loaded successfully.")
-    in_channels = data.x.size(1)
+    graph_name = config.get('graph', 'causal')
+    data = torch.load(os.path.join('data', 'processed', f'graph_{graph_name}.pt'), weights_only=False)
+    print(f"Graph: {graph_name}")
 
-    # Instantiate model
-    if config['model'] == 'sage':
-        model = GraphSAGEModel(in_channels, config.get('hidden_channels', 64)).to(device)
-    elif config['model'] == 'gat':
-        model = FraudGAT(in_channels, config.get('hidden_channels', 64), heads=config.get('heads', 4), dropout=config.get('dropout', 0.3)).to(device)
-    elif config['model'] == 'camouflage':
-        model = FraudCamouflageGNN(in_channels, config.get('hidden_channels', 64), heads=config.get('heads', 4), dropout=config.get('dropout', 0.3)).to(device)
-    else:
-        raise ValueError("Unknown model type")
-
-    # BUGFIX: train.py saves checkpoints as a dict with multiple keys
-    # ({'model': state_dict, 'optimizer': ..., 'epoch': ..., ...}), not as
-    # a bare state_dict. Passing that whole dict straight into
-    # load_state_dict() raises a RuntimeError (missing/unexpected keys)
-    # every time -- this was silently blocking all test-set evaluation for
-    # every model, since run_experiments.py calls this script right after
-    # every training run and would fail here immediately.
+    model = build_model(config, data.x.size(1)).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model'])
-    model.eval()
 
-    print("Setting up test data loader...")
-    if os.environ.get('EVAL_PLUMBING_TEST') == '1':
-        print("Warning: EVAL_PLUMBING_TEST=1. Using dummy loader for plumbing tests.")
-        from torch_geometric.data import Data
-        dummy_batch = Data(x=torch.randn(2, in_channels).to(device), 
-                           edge_index=torch.tensor([[0, 1], [1, 0]]).to(device), 
-                           y=torch.tensor([0, 1]).to(device), 
-                           batch_size=2)
-        test_loader = [dummy_batch]
-    else:
-        test_loader = NeighborLoader(
-            data,
-            num_neighbors=[25, 10],
-            batch_size=2048,
-            input_nodes=data.test_mask,
-            shuffle=False,
-            num_workers=0,
-        )
+    # Review thresholds are set on validation, then applied once to test.
+    val_logits, _ = predict(model, data, data.val_mask, device)
+    test_logits, test_labels = predict(model, data, data.test_mask, device)
 
-    print("Evaluating on test set...")
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for batch in test_loader:
-            batch = batch.to(device)
-            out = model(batch.x, batch.edge_index).squeeze(-1)
-            all_preds.append(out[:batch.batch_size])
-            all_labels.append(batch.y[:batch.batch_size])
-            
-    all_preds = torch.cat(all_preds)
-    all_labels = torch.cat(all_labels)
-    test_metrics = compute_metrics(all_preds, all_labels)
+    results = compute_metrics(test_logits, test_labels)
+    results['graph'] = graph_name
+    results['budgets'] = budget_report(val_logits, test_logits, test_labels, args.budgets)
 
-    print("Test Results:")
-    print(f"  PR-AUC:  {test_metrics['pr_auc']:.4f}")
-    print(f"  ROC-AUC: {test_metrics['roc_auc']:.4f}")
-    print(f"  F1-Score:{test_metrics['f1']:.4f}")
+    print("Test results:")
+    print(f"  PR-AUC:  {results['pr_auc']:.4f}")
+    print(f"  ROC-AUC: {results['roc_auc']:.4f}")
+    for row in results['budgets']:
+        print(f"  budget {row['budget']:.0%}: precision {row['precision_at_budget']:.4f}, "
+              f"recall {row['recall_at_budget']:.4f}, flagged {row['flagged_fraction']:.2%}")
 
-    # Save test metrics
-    with open(os.path.join(args.exp_dir, 'test_results.json'), 'w') as f:
-        json.dump(test_metrics, f, indent=4)
+    with open(out_path, 'w') as f:
+        json.dump(results, f, indent=4)
+    print(f"Saved {out_path}")
+
 
 if __name__ == "__main__":
     main()
