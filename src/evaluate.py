@@ -57,6 +57,21 @@ def predict(model, data, mask, device):
     return torch.cat(logits), torch.cat(labels)
 
 
+def best_training_epoch(exp_dir):
+    """The epoch training saved as best, read from metrics.json. None if unavailable."""
+    path = os.path.join(exp_dir, 'metrics.json')
+    if not os.path.exists(path):
+        return None
+    with open(path, 'r') as f:
+        log = json.load(f)
+    if not log:
+        return None
+    best = max(log, key=lambda row: row['val_score'])
+    return {'epoch': best['epoch'],
+            'logged_val_pr_auc': best['pr_auc'],
+            'epochs_logged': len(log)}
+
+
 def main():
     args = parse_args()
     out_path = os.path.join(args.exp_dir, 'test_results.json')
@@ -85,12 +100,25 @@ def main():
     model.load_state_dict(checkpoint['model'])
 
     # Review thresholds are set on validation, then applied once to test.
-    val_logits, _ = predict(model, data, data.val_mask, device)
+    val_logits, val_labels = predict(model, data, data.val_mask, device)
     test_logits, test_labels = predict(model, data, data.test_mask, device)
 
     results = compute_metrics(test_logits, test_labels)
     results['graph'] = graph_name
     results['budgets'] = budget_report(val_logits, test_logits, test_labels, args.budgets)
+
+    # Diagnostics. Validation numbers are recomputed here so they can be checked
+    # against the value logged during training. They do not affect the test numbers.
+    results['val'] = compute_metrics(val_logits, val_labels)
+    results['best_training_epoch'] = best_training_epoch(args.exp_dir)
+
+    print("Validation (recomputed):")
+    print(f"  PR-AUC:  {results['val']['pr_auc']:.4f}")
+    print(f"  ROC-AUC: {results['val']['roc_auc']:.4f}")
+    if results['best_training_epoch']:
+        b = results['best_training_epoch']
+        print(f"  best training epoch {b['epoch']} of {b['epochs_logged']} logged, "
+              f"logged val PR-AUC {b['logged_val_pr_auc']:.4f}")
 
     print("Test results:")
     print(f"  PR-AUC:  {results['pr_auc']:.4f}")
