@@ -2,6 +2,7 @@
 run_name: "lgbm_tabular"
 seed: 42
 graph: "causal"
+feature_set: "node"
 num_boost_round: 2000
 early_stopping_rounds: 100
 params:

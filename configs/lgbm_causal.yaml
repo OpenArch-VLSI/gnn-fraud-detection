@@ -1,0 +1,15 @@
+# Stronger non-graph baseline: node features plus causal entity-history features.
+# Run with: python src/train_tabular.py --config configs/lgbm_causal.yaml --raw_dir data/raw
+run_name: "lgbm_causal"
+seed: 42
+graph: "causal"
+feature_set: "causal"
+num_boost_round: 2000
+early_stopping_rounds: 100
+params:
+  learning_rate: 0.05
+  num_leaves: 63
+  min_data_in_leaf: 100
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 1

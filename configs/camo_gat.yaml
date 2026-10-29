@@ -8,4 +8,6 @@ seed: 42
 graph: "causal"
 # Weight on the auxiliary loss that trains score_head (train.py). Not yet tuned.
 aux_loss_weight: 0.3
+# Trust computed from detached scores (default, interpretable). See decisions.md.
+detach_trust: true
 run_name: "camo_gat_baseline"
