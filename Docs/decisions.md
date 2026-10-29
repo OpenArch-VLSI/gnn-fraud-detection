@@ -5,8 +5,10 @@ Date format: YYYY-MM-DD. Each decision is final until a newer entry overrides it
 ## Pre-registered comparison (fixed before the final runs)
 - 2026-10-29: Primary metric: test PR-AUC, averaged over seeds 42, 123 and 456.
 - 2026-10-29: Hypothesis: the best GNN (selected on validation PR-AUC) has higher test PR-AUC than the best LightGBM, selected the same way.
-- 2026-10-29: Stronger hypothesis: the GNN also beats LightGBM with causal entity-history features (`feature_set: causal`).
-- 2026-10-29: Decision rule: a GNN "wins" only if the paired bootstrap 95% interval for the PR-AUC difference (`scripts/paired_bootstrap.py`) lies entirely above zero.
+- 2026-10-29: Primary comparator: the best LightGBM by validation PR-AUC. Of the two baselines, this is `lgbm_tabular` (node features, validation PR-AUC 0.6149) rather than `lgbm_causal` (0.5990). This applies the rule above to the two runs already made. It does not change the rule. Both baseline runs were complete when this was written, and their validation numbers were used to choose. Their test numbers were also visible when this was written, so the report must say so.
+- 2026-10-29: Secondary hypothesis: the GNN also beats `lgbm_causal` (`feature_set: causal`). Reported in full, but it is not the basis of the decision.
+- 2026-10-29: Decision rule: a GNN "wins" only if the paired bootstrap 95% interval for the PR-AUC difference (`scripts/paired_bootstrap.py`) against the primary comparator lies entirely above zero.
+- 2026-10-29: Screen before the test comparison: a GNN family whose best validation PR-AUC is below the primary comparator's validation PR-AUC (0.6149) is reported as not competitive. It is not evaluated on test as a candidate winner, but its runs are still reported.
 - 2026-10-29: Tuning budget is equal for each model family: the same learning-rate grid and the same number of configurations, selected on validation PR-AUC only.
 - 2026-10-29: Tuning grid, selected on validation PR-AUC only: learning rate {0.0003, 0.001, 0.003, 0.01} for each of SAGE, GAT and camouflage; camouflage `detach_trust` {true, false}. `aux_loss_weight` is fixed at 0.3 and the loss weights `rank_loss_weight` and `ap_loss_weight` are fixed at 1.0. Neither is tuned. Changing this grid after any final run is not allowed.
 - 2026-10-29: Breakdown analysis is reported whatever its result: cards seen in training versus unseen, and the first versus second half of the test period.
@@ -18,7 +20,7 @@ Date format: YYYY-MM-DD. Each decision is final until a newer entry overrides it
 - 2026-10-28: Camouflage mechanism is kept. The canonical version is `FraudCamouflageGNN` in `src/models/models.py`. The old hand-written camouflage layer is removed.
 - 2026-10-28: Node features add frequency of card, address, email domain and device, and hour of day. All are computed without labels.
 - 2026-10-29: Camouflage trust is computed from detached scores by default (`detach_trust: true`). The alternative is compared on validation PR-AUC only.
-- 2026-10-29: Entity-history features for LightGBM (`feature_set: causal`) use only earlier transactions for the same value.
+- 2026-10-29: Entity-history features for LightGBM (`feature_set: causal`) use only earlier transactions for the same value. In the first run they did not raise validation PR-AUC (see `Docs/status.md`).
 
 ## Evaluation protocol
 - 2026-10-28: Time-based split: first 70% train, next 15% validation, last 15% test, ordered by `TransactionDT`.
@@ -33,7 +35,8 @@ Date format: YYYY-MM-DD. Each decision is final until a newer entry overrides it
 - 2026-10-28: Training environment is the Kaggle image: Python 3.13.15, torch 2.11.0+cu128, torch-geometric 2.8.0.post1, lightgbm 4.6.0, pandas 2.3.3, numpy 2.1.3, scikit-learn 1.6.1, Tesla T4 GPU. `requirements.txt` pins these versions. Local tests use the same versions.
 - 2026-10-28: Code reaches Kaggle as a zip made from a local commit with `git archive`. Each run therefore matches one commit. The commit hash is recorded in `Docs/status.md` with each run.
 - 2026-10-28: Commits are made locally once tests pass. They are pushed to GitHub only after the team agrees.
-- 2026-10-28: Kaggle notebooks must not run `pip install` for torch. The image already provides it. `torch-geometric` is installed with the pinned version in the setup cell, as the image does not include it.
+- 2026-10-28: Kaggle notebooks must not run `pip install` for torch. The image already provides it. `torch-geometric` and `pyg-lib` are installed with the pinned versions in the setup cell, as the image does not include them.
+- 2026-10-29: Run outputs stay in the Kaggle session until copied. Each `test_results.json` used in the report must be copied into `experiments/<run_name>/` and committed.
 
 ## Demo and presentation
 - 2026-10-28: `agent.py` is an optional demo in `demo/`, not part of the results.
