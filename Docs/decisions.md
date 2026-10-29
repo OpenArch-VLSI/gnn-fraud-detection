@@ -8,6 +8,7 @@ Date format: YYYY-MM-DD. Each decision is final until a newer entry overrides it
 - 2026-10-29: Stronger hypothesis: the GNN also beats LightGBM with causal entity-history features (`feature_set: causal`).
 - 2026-10-29: Decision rule: a GNN "wins" only if the paired bootstrap 95% interval for the PR-AUC difference (`scripts/paired_bootstrap.py`) lies entirely above zero.
 - 2026-10-29: Tuning budget is equal for each model family: the same learning-rate grid and the same number of configurations, selected on validation PR-AUC only.
+- 2026-10-29: Tuning grid, selected on validation PR-AUC only: learning rate {0.0003, 0.001, 0.003, 0.01} for each of SAGE, GAT and camouflage; camouflage `detach_trust` {true, false}. `aux_loss_weight` is fixed at 0.3 and the loss weights `rank_loss_weight` and `ap_loss_weight` are fixed at 1.0. Neither is tuned. Changing this grid after any final run is not allowed.
 - 2026-10-29: Breakdown analysis is reported whatever its result: cards seen in training versus unseen, and the first versus second half of the test period.
 - 2026-10-29: If the GNN does not win, the report says so. A negative result is a valid result.
 - 2026-10-29: This block must be committed before the final runs. Its commit hash is recorded in `Docs/status.md`.
@@ -23,7 +24,7 @@ Date format: YYYY-MM-DD. Each decision is final until a newer entry overrides it
 - 2026-10-28: Time-based split: first 70% train, next 15% validation, last 15% test, ordered by `TransactionDT`.
 - 2026-10-28: Checkpoint selection and early stopping use validation PR-AUC only. ROC-AUC is reported but does not select checkpoints.
 - 2026-10-28: The causal graph (each transaction linked only to earlier transactions) is the main result. The full graph is an upper bound and is never the headline.
-- 2026-10-28: Review budgets: 1% headline, with 5% and 10% also reported. The budgets were chosen by the project members before any budget-level result existed. The earlier SAGE run printed no budget metrics, so no budget-level test number has been seen. The budget is an assumption, not a measured review capacity: "we assume a review team can check about 1% of transactions." The report must state this.
+- 2026-10-28: Review budgets: 1% headline, with 5% and 10% also reported. The budgets were chosen by the project members on 2026-10-28, before any budget-level result existed. The earlier SAGE run printed no budget metrics, so no budget-level test number has been seen. The budget is an assumption, not a measured review capacity: "we assume a review team can check about 1% of transactions." Intervals are reported alongside precision at each budget. The report must state this.
 - 2026-10-28: The test split is evaluated once per run. `evaluate.py` refuses to overwrite `test_results.json` unless `--force` is given. Smoke-run numbers are never reported.
 - 2026-10-28: Before the final runs, the fraud rate of each split is recorded in `Docs/status.md`. The validation-to-test gap seen in the earlier SAGE run must be explained first.
 - 2026-10-28: Results files are generated only from `experiments/*/test_results.json`. Archived reports that could not be traced to runs are deleted.
