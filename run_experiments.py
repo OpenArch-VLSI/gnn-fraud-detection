@@ -68,9 +68,11 @@ def main():
                 continue
                 
             pr_mean = np.mean(pr_aucs)
-            pr_std = np.std(pr_aucs)
+            # ddof=1: sample standard deviation. With only 3 seeds, the
+            # population std (ddof=0) noticeably understates the spread.
+            pr_std = np.std(pr_aucs, ddof=1)
             roc_mean = np.mean(roc_aucs)
-            roc_std = np.std(roc_aucs)
+            roc_std = np.std(roc_aucs, ddof=1)
             
             f.write(f"| {config_name} | {pr_mean:.4f} ± {pr_std:.4f} | {roc_mean:.4f} ± {roc_std:.4f} |\n")
 

@@ -3,4 +3,5 @@ epochs: 100
 lr: 0.01
 hidden_channels: 64
 seed: 42
+graph: "causal"
 run_name: "sage_baseline"

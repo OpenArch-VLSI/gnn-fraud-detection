@@ -1,5 +1,19 @@
 # Camouflage-Robust Graph Neural Networks for Fraud Ring Identification — Project Roadmap
 
+## Current status (2026-10-28): read this first
+
+This file keeps the original plan and its history. Where it conflicts with the
+decisions below, **`Docs/decisions.md` wins**. Current state is in `Docs/status.md`.
+
+- Final models use PyTorch Geometric layers. Hand-written SAGE/GAT are kept as
+  tested reference code. Layer choice follows the rule in decisions.md.
+- The camouflage model is `FraudCamouflageGNN` in `src/models/models.py`. The
+  hand-written camouflage layer has been removed.
+- Graphs: `graph_causal.pt` (main result) and `graph_full.pt` (upper bound).
+- Checkpoint selection on validation PR-AUC only. Review budgets 1% (headline),
+  5%, 10%. Test split evaluated once per run.
+- Training runs on Kaggle with the versions listed in decisions.md.
+
 ## 0. How to use this document
 
 **You (the student):** Read it once top to bottom so you know the shape of the whole
@@ -8,16 +22,7 @@ you can tick off. The "Concepts to understand" boxes are your personal study lis
 you should be able to explain those in your own words before moving on, regardless
 of what the agent writes for you.
 
-**Antigravity (the coding agent), if you're reading this file:** Work through the
-phases in order. Do not start Phase *N+1* until Phase *N*'s Definition of Done is
-satisfied. Each phase's task list is your task list for that session. Obey every
-"Agent guardrails" note literally — they exist because of constraints the professor
-set, not stylistic preferences. If a request from the user conflicts with a
-guardrail (e.g. "just import GATConv to save time"), flag the conflict instead of
-silently complying or silently refusing. One more constraint that isn't the
-professor's but is just as real: you don't have your own GPU. Every phase below
-that needs one runs on Kaggle, not in your local sandbox — see §0.1 for exactly
-where that line falls.
+**Working rules:** Work through the phases in order. Do not start Phase *N+1* until Phase *N*'s Definition of Done is satisfied. Each phase's task list is your task list for that session. Obey every "Agent guardrails" note literally; they exist because of constraints the professor set. If a request conflicts with a guardrail (e.g. "just import GATConv to save time"), flag the conflict instead of silently complying or silently refusing. There is no local GPU. Every phase that needs one runs on Kaggle; see §0.1.
 
 > **Non-negotiable rule for Phase 7:** do not port or closely translate code from
 > the CARE-GNN or PC-GNN reference repositories. Read them, understand the
@@ -28,42 +33,9 @@ where that line falls.
 ## 0.1 Compute & tooling setup
 
 No local high-spec machine is available for this project. Every GPU-bound phase
-runs on Kaggle's free notebook tier, and the coding agent is Gemini 3.1 Pro (High
-thinking level) running inside Google's Antigravity IDE.
+runs on Kaggle's free notebook tier, .
 
-- **Local vs. remote split (applies everywhere):** Antigravity/Gemini runs on
-  your machine (or wherever the IDE is hosted) and has no GPU of its own. It's
-  full-time help for writing code, designing the Phase 7 mechanism, debugging,
-  and drafting the report — but the actual execution of every GPU-bound phase
-  (3, 4, 5, 7, 8) happens on Kaggle, a separate environment it can only reach by
-  pushing code in (via `git clone` inside the notebook, or the `kaggle` CLI) and
-  pulling results back out, not by running things directly the way it would
-  against a local GPU.
-- **Debug locally first, always.** Because Antigravity cannot watch a Kaggle
-  run live or fix a crash mid-session, the default workflow for every
-  GPU-bound phase is: write and iterate against a small local CPU subsample
-  until the script is confirmed correct (runs cleanly, loss behaves, no shape
-  errors), *then* hand it off to Kaggle for the real run. Kaggle time is a
-  rationed resource — treat it as reserved for confirmed-stable code, not a
-  place to debug. If several small variants need testing (e.g. a few Phase 7
-  mechanism tweaks), queue them within one Kaggle session rather than starting
-  a fresh session per idea, since the quota is billed per hour, not per run.
-- **Thinking-level note:** run Gemini 3.1 Pro on "High" throughout — quota
-  resets every 5 hours, so there's no real cost to keeping the deeper
-  reasoning on for the whole project rather than switching levels per task.
-- **Phase 0** is built around Kaggle account/accelerator/quota setup and a
-  git-to-Kaggle sync method.
-- **Phase 1 / Phase 2** run on a CPU-only session (Kaggle or local) — no GPU
-  needed for EDA or graph construction, and CPU sessions don't draw down your
-  GPU quota.
-- **Phase 3:** assume Kaggle's free GPUs are meaningfully small (16GB VRAM,
-  ~29GB system RAM once a GPU is attached). Neighbor sampling is the likely
-  default, not a fallback you probably won't need.
-- **Phase 5, 7, 8:** include checkpoint/resume and GPU-hour budgeting
-  guardrails — a lost multi-hour run against a 30-hour weekly cap is expensive
-  to redo.
-- **Appendix E** includes risk-register rows for quota exhaustion, session
-  disconnects, and local/Kaggle environment drift.
+- **Local vs. remote split:** code is written and unit-tested locally on CPU only. Every GPU-bound phase (3, 4, 5, 7, 8) runs on Kaggle, which pulls the code in from GitHub or an uploaded zip, and results are pulled back out. Before each Kaggle run, debug on a small CPU subsample. Kaggle GPU quota is limited, so use the checkpoint and resume rules from Phase 0.
 
 ---
 
@@ -144,7 +116,7 @@ happened on Kaggle:
 - Python 3.10+, PyTorch. On Kaggle you don't pick a CUDA build yourself — the
   notebook image ships a fixed PyTorch+CUDA pair. Check `torch.__version__`
   first thing in Phase 0 and treat it as given; for local editing/unit-testing
-  with Antigravity (no GPU available there), install CPU-only PyTorch in a
+  locally (no GPU available there), install CPU-only PyTorch in a
   small venv, same major version where possible, purely so tests and
   small-sample debugging run instantly without touching Kaggle quota
 - Scatter/reduce ops: prefer **native PyTorch** (`torch.Tensor.scatter_reduce_`,
@@ -195,12 +167,12 @@ fraud-gnn/
   ROADMAP.md                 # this file
 ```
 
-This repo lives on GitHub and is what Antigravity edits directly. Kaggle never
+This repo lives on GitHub and is the single source of the code. Kaggle never
 edits it — a notebook only pulls it in (`!git clone`, or a token-authenticated
 pull for a private repo) at the start of a session, runs `src/train.py`, and
 its outputs get pulled back out (commit the notebook version, or push results
 to a Kaggle Dataset to persist beyond one session). Keep it one-directional:
-code changes always originate locally with Antigravity, never inside the
+code changes always originate locally, never inside the
 Kaggle notebook itself, or the two copies will drift.
 
 ---
@@ -209,16 +181,16 @@ Kaggle notebook itself, or the two copies will drift.
 **~2–3 days**
 
 Goal: a reproducible environment and a scaffold, before any modeling. This spans
-two places — a local, GPU-less environment where Antigravity actually edits
-code, and Kaggle, where the code actually runs. Set both up and prove they talk
+two places — a local, GPU-less environment where code is written and tested
+, and Kaggle, where the code actually runs. Set both up and prove they talk
 to each other before Phase 1.
 
 Tasks
 
-*Local side (Antigravity's workspace):*
+*Local side (your PC):*
 - [ ] Initialize git; create the folder structure in §4
 - [ ] Create a lightweight local venv with **CPU-only** PyTorch — enough to run
-      unit tests and debug small-sample code with Antigravity without needing a
+      unit tests and debug small-sample code without needing a
       GPU or touching Kaggle quota
 - [ ] Write a `set_seed(seed)` utility used everywhere (Python, numpy, torch, cuda)
 - [ ] Stub `README.md` with the one-paragraph project summary
@@ -237,7 +209,7 @@ Tasks
       embed the token directly in the notebook cell, as notebook version history
       will permanently leak it if the notebook is ever made public), or push/pull
       via the `kaggle` CLI's `kernels push` / `kernels pull`. Confirm a full cycle
-      works — edit locally with Antigravity → sync to Kaggle → run → pull
+      works — edit locally → sync to Kaggle → run → pull
       results back — before you build anything on top of it
 - [ ] Check your current weekly GPU-hour and TPU-hour balance in Kaggle's
       Settings, so Phase 1 onward starts from a known budget
@@ -336,7 +308,7 @@ can consume, run once, reused by every later phase.
       capped-group edge volume by roughly 5x while still preserving the
       relation signal.)
 - [x] Serialize: combined `edge_index` tensor (all five relations merged),
-      node feature matrix, label vector → `data/processed/graph.pt`, so
+      node feature matrix, label vector → `data/processed/graph_causal.pt` and `graph_full.pt`, so
       nothing downstream re-parses raw CSVs. **Verified output: 590,540
       nodes, 425 features, 45,528,526 total combined edges**
       (card1: 11,200,772; card2: 11,631,988; addr1: 10,486,078;
@@ -363,7 +335,7 @@ balance at the end.
 
 ---
 
-## Phase 3 — GraphSAGE from scratch
+## Phase 3 — GraphSAGE (hand-written reference; library model used for results)
 **~1 week**
 
 Goal: hand-implement mean-aggregation message passing and a 2-layer SAGE model.
@@ -393,10 +365,10 @@ Tasks
 - [x] Unit tests exist and pass (9/9 in the current suite), covering the
       hand-written layers' shapes and gradient flow
 
-Agent guardrails: **do not** import `torch_geometric.nn.SAGEConv`,
-`dgl.nn.SAGEConv`, or any prebuilt message-passing layer. Comment each line of
+Agent guardrails (updated 2026-10-28): the final models import PyG's layers. The
+hand-written `sage.py` is a reference, tested against the library layer. Comment each line of
 the layer with which part of the formula above it implements. **Keep this
-layer as the single canonical `SAGEConv` in the repo** — at one point two
+layer as the single reference `SAGEConv` in the repo (the models use the library layer)** — at one point two
 independently-written versions (from different contributors) existed side by
 side, which risks shape mismatches and checkpoints that don't correspond to
 the code loading them; resolve any future duplication immediately rather than
@@ -407,7 +379,7 @@ subsample within a few minutes.
 
 ---
 
-## Phase 4 — GAT from scratch
+## Phase 4 — GAT (hand-written reference; library model used for results)
 **~1 week**
 
 Goal: hand-implement attention-based aggregation.
@@ -605,7 +577,7 @@ report's contribution statement — it's precise and it holds up against a
 literature-aware reader.
 
 **Chosen mechanism: label-aware similarity-gated attention.** Each
-camouflage-GAT layer (`camouflage_gat.py`) has a small per-node `score_head`
+camouflage-GAT layer (`FraudCamouflageGNN` in `src/models/models.py`) has a small per-node `score_head`
 (`nn.Linear`) that predicts a node's own fraud-likelihood from its projected
 features alone (no graph). Trust between two connected nodes is then
 `exp(-|score_src - score_dst|)` — neighbors are trusted when their
@@ -622,7 +594,7 @@ port of CARE-GNN's code.
 
 Tasks
 - [x] Implement the chosen mechanism as a module wrapping/extending the
-      Phase 4 GAT — done: `camouflage_gat.py`'s `score_head` and label-aware
+      Phase 4 GAT — done: `FraudCamouflageGNN` in `src/models/models.py`'s `score_head` and label-aware
       trust signal, with `FraudCamouflageGNN` in `models.py` exposing
       `auxiliary_node_scores()` (the cached per-node scores, averaged across
       heads and layers) so the scores can be supervised directly. `train.py`
@@ -651,7 +623,7 @@ Tasks
       data/training pipeline. Leading suspects, per the diagnostic already
       laid out during baseline debugging: the untuned `aux_loss_weight`
       (`0.3`, never validated) overwhelming the main classification loss, or
-      a bug in `CamouflageGATConv`'s trust-signal computation actively
+      a bug in the removed hand-written `CamouflageGATConv`'s trust-signal computation actively
       hurting rather than helping attention. **Neither has actually been
       diagnosed or fixed yet** — this is open work, not resolved by the
       baseline debugging that ruled out the pipeline as the cause.
@@ -814,7 +786,7 @@ needs more GPU time than a week gives you, it spills into next week's
 allowance; plan Phases 7–8 especially with this in mind rather than assuming a
 week's estimate and a week's quota line up on their own.*
 
-## Appendix C — "From scratch" scope clarification
+## Appendix C — "From scratch" scope clarification (superseded 2026-10-28)
 
 **Allowed:** `torch.nn.Linear`, autograd, optimizers, `torch.sparse`, raw tensor
 indexing, native PyTorch scatter/reduce ops (`scatter_reduce_`, `index_add_`) or
@@ -822,14 +794,13 @@ indexing, native PyTorch scatter/reduce ops (`scatter_reduce_`, `index_add_`) or
 primitive index-reduce operations, not models), and PyTorch Geometric's
 `Data`/`Dataset` classes purely for loading/storing graphs.
 
-**Not allowed:** `torch_geometric.nn.SAGEConv`, `GATConv`, or any other
-prebuilt message-passing layer from PyG, DGL, or similar libraries — for either
-the baselines or the novel module.
+**Decision (2026-10-28):** the final models use PyTorch Geometric's `SAGEConv`,
+`GATConv` and `NeighborLoader`. The professor's instruction in class was to use the
+best method to train the best model. Hand-written versions remain as tested
+reference code.
 
-This line (data-loading utilities are fine, model layers are not) is a
-reasonable reading of "no pretrained models," but it's still worth a one-line
-confirmation from your professor early on, since "no pretrained models" is
-slightly ambiguous about utility functions like this.
+The earlier reading above was the roadmap's own interpretation. It was not a
+rule stated by the professor, so it no longer applies.
 
 ## Appendix D — Reading list (for citation, not for copying)
 
@@ -911,14 +882,14 @@ section:**
 |---|---|---|
 | Graph construction (Phase 2) takes longer than a week | Medium | Time-box it; fall back to Elliptic if you're not done by end of week 2 |
 | Novel module (Phase 7) doesn't beat baseline | Medium | Still a valid, explainable result — budget time to analyze *why*, don't just keep tuning |
-| Novel module (Phase 7) fails to train at all (not just "underperforms") | **Realized** — camouflage-GAT's only full-graph run collapsed to ROC-AUC ≈ 0.5 | Ruled out the shared pipeline as the cause by confirming both baselines train normally first; remaining suspects are `aux_loss_weight` tuning and the trust-signal computation in `CamouflageGATConv` — diagnose there next, starting with a subsample run at a much smaller `aux_loss_weight` before returning to the full graph |
+| Novel module (Phase 7) fails to train at all (not just "underperforms") | **Realized** — the earlier hand-written camouflage-GAT's only full-graph run collapsed to ROC-AUC ≈ 0.5 (that layer is removed; the PyG `FraudCamouflageGNN` has not been trained yet) | Ruled out the shared pipeline as the cause by confirming both baselines train normally first; remaining suspects are `aux_loss_weight` tuning and the trust-signal computation in the removed hand-written `CamouflageGATConv` — diagnose there next, starting with a subsample run at a much smaller `aux_loss_weight` before returning to the full graph |
 | A harness bug silently produces wrong or no results without erroring | **Realized twice** — `evaluate.py` never unwrapped the checkpoint dict, so test-set evaluation silently produced nothing until caught; a training run also silently trained the wrong model class (SAGE instead of GAT) due to a `load_config()` bug | Treat "the script ran without an error" as insufficient evidence of correctness — spot-check a completed run's actual saved config/output against what was intended, not just its exit code |
 | Hub-node explosion makes the graph unusable | Medium–High (IEEE-CIS) | Degree caps from Phase 2, checked immediately after construction, not discovered mid-training |
 | Running out of time for the report | High if left until the end | Start the related-work section in Phase 6, not Phase 10 |
-| "From scratch" scope dispute with professor | Low, but costly if it happens | Confirm Appendix C's line with them in week 1 |
+| "From scratch" scope dispute | Resolved 2026-10-28 | Based on the professor's in-class instruction; hand-written reference layers kept and tested |
 | Novelty claim challenged as "already done" (T-Finance/S-FFSD/RL-GNN exist) | Low, with mitigation in place | Precise novelty statement in §1 and Phase 7; RL-GNN is required reading in Phase 6 so the differentiation paragraph is specific, not naive |
 | Tabular baseline (Phase 5) matches or beats every graph model | Medium | Still a valid, honestly-reportable finding — reframe the report's contribution around *when/why* graph structure and camouflage-resistance help rather than *whether* graphs beat tables; the Phase 8 camouflage-specific ablations stay meaningful either way |
 | Synthetic camouflage injection (Phase 8) doesn't move any model's score | Medium | Also a valid, reportable result — but first check the injection isn't so large it saturates every model's neighborhood indiscriminately; sweep several injection levels before concluding the mechanism doesn't matter |
 | Weekly GPU quota (30h) or 12h session cap runs out mid-phase | High during Phases 7–8 | Checkpoint/resume every run (Phase 0); do EDA, graph construction, and unit-testing on CPU-only sessions, which don't draw down GPU quota; budget Phase 8's full sweep against the weekly cap before launching it |
 | Kaggle session disconnects or idles out, losing an unsaved run | Medium | Same checkpoint/resume discipline as above; commit ("Save Version") after every meaningful run rather than relying on an interactive session's live state |
-| Locally-authored code (Antigravity) behaves differently on Kaggle's pre-built image (library version drift) | Medium | Pin versions in `requirements.txt` against what Kaggle's image actually has (Phase 0); run a trivial push-run-pull dry cycle before Phase 1 rather than discovering mismatches under time pressure |
+| Locally-authored code behaves differently on Kaggle's pre-built image (library version drift) | Medium | Pin versions in `requirements.txt` against what Kaggle's image actually has (Phase 0); run a trivial push-run-pull dry cycle before Phase 1 rather than discovering mismatches under time pressure |

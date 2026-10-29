@@ -1,0 +1,12 @@
+model: "camouflage"
+epochs: 100
+lr: 0.001
+hidden_channels: 64
+heads: 4
+dropout: 0.3
+seed: 42
+graph: "causal"
+aux_loss_weight: 0.3
+# Trust computed from undetached scores: the main loss also shapes score_head.
+detach_trust: false
+run_name: "camo_gat_nodetach"
