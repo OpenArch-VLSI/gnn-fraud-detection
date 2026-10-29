@@ -3,6 +3,7 @@ import json
 import os
 import sys
 
+import numpy as np
 import torch
 from torch_geometric.loader import NeighborLoader
 
@@ -36,7 +37,8 @@ def build_model(config, in_channels):
     if config['model'] == 'gat':
         return FraudGAT(in_channels, hidden, heads=heads, dropout=dropout)
     if config['model'] == 'camouflage':
-        return FraudCamouflageGNN(in_channels, hidden, heads=heads, dropout=dropout)
+        return FraudCamouflageGNN(in_channels, hidden, heads=heads, dropout=dropout,
+                                  detach_trust=config.get('detach_trust', True))
     raise ValueError(f"Unknown model type: {config['model']}")
 
 
@@ -75,6 +77,7 @@ def best_training_epoch(exp_dir):
 def main():
     args = parse_args()
     out_path = os.path.join(args.exp_dir, 'test_results.json')
+    scores_path = os.path.join(args.exp_dir, 'test_scores.npz')
     config_path = os.path.join(args.exp_dir, 'config.json')
     model_path = os.path.join(args.exp_dir, 'best_model.pt')
 
@@ -129,7 +132,9 @@ def main():
 
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=4)
-    print(f"Saved {out_path}")
+    # Per-row test scores, with the same row order as the graph test mask.
+    np.savez(scores_path, scores=test_logits.numpy(), labels=test_labels.numpy())
+    print(f"Saved {out_path} and {scores_path}")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,18 @@
 """
-Non-graph reference baseline: LightGBM on the node feature matrix only.
+Non-graph reference baseline: LightGBM.
 
-Uses the same time-based masks and features as the graph models. Edges are
-ignored, so the causal and full graph files give the same result. Reports
-test metrics in the same format as evaluate.py.
+Two feature sets, chosen with the config's `feature_set` key:
+  node      the same node feature matrix the GNNs use (no graph)
+  causal    node features plus causal entity-history features, computed only from
+            earlier transactions for the same card, address, email domain and device.
+            This is the stronger baseline a GNN must beat.
+
+Uses the same time-based masks as the graph models. Writes test scores to
+test_scores.npz so the paired bootstrap can compare models on identical rows.
 
 Usage:
     python src/train_tabular.py --config configs/lgbm_tabular.yaml
+    python src/train_tabular.py --config configs/lgbm_causal.yaml --raw_dir data/raw
 """
 import argparse
 import json
@@ -15,6 +21,7 @@ import sys
 
 import lightgbm as lgb
 import numpy as np
+import pandas as pd
 import torch
 import yaml
 
@@ -32,6 +39,37 @@ DEFAULT_PARAMS = {
     'bagging_fraction': 0.8,
     'bagging_freq': 1,
 }
+ENTITY_COLS = ['card1', 'addr1', 'P_emaildomain', 'DeviceInfo']
+
+
+def causal_entity_features(raw_dir):
+    """
+    Entity-history features for each transaction, using only EARLIER rows with the
+    same entity value. Rows are sorted by TransactionDT (same order as build_graph.py),
+    and the current row is never included. Returns a frame aligned to the sorted rows.
+    """
+    tx = pd.read_csv(os.path.join(raw_dir, 'train_transaction.csv'))
+    tx = tx.sort_values('TransactionDT').reset_index(drop=True)
+    amt = np.log1p(tx['TransactionAmt'].astype(float).clip(lower=0))
+    t = tx['TransactionDT'].astype(float)
+    out = {}
+
+    for col in ENTITY_COLS:
+        key = tx[col].astype(str).where(tx[col].notna(), 'MISSING')
+        prior_n = key.groupby(key).cumcount()
+        out[f'{col}_hist_count'] = np.log1p(prior_n)
+
+        prior_sum = amt.groupby(key).cumsum() - amt
+        prior_sq = (amt ** 2).groupby(key).cumsum() - amt ** 2
+        mean = (prior_sum / prior_n).where(prior_n > 0)
+        var = (prior_sq / prior_n - mean ** 2).clip(lower=0)
+        out[f'{col}_hist_amt_mean'] = mean
+        out[f'{col}_hist_amt_std'] = np.sqrt(var)
+
+        # Time since the previous transaction with the same value.
+        out[f'{col}_hist_gap'] = np.log1p(t.groupby(key).diff().clip(lower=0))
+
+    return pd.DataFrame(out)
 
 
 def train_lightgbm(x, y, train_mask, val_mask, params, num_boost_round,
@@ -70,7 +108,7 @@ def train_lightgbm(x, y, train_mask, val_mask, params, num_boost_round,
 
 
 def run_experiment(x, y, masks, cfg, exp_dir):
-    """Train, then write config, model, metrics and test results to exp_dir."""
+    """Train, then write config, model, metrics, test results and scores to exp_dir."""
     set_seed(cfg['seed'])
     booster, best = train_lightgbm(
         x, y, masks['train'], masks['val'],
@@ -82,12 +120,14 @@ def run_experiment(x, y, masks, cfg, exp_dir):
 
     val_logits = torch.tensor(booster.predict(x[masks['val']], raw_score=True, num_iteration=best))
     test_logits = torch.tensor(booster.predict(x[masks['test']], raw_score=True, num_iteration=best))
+    val_labels = torch.tensor(y[masks['val']])
     test_labels = torch.tensor(y[masks['test']])
     budgets = cfg.get('review_budgets', DEFAULT_BUDGETS)
 
-    val_metrics = compute_metrics(val_logits, torch.tensor(y[masks['val']]))
+    val_metrics = compute_metrics(val_logits, val_labels)
     test_results = compute_metrics(test_logits, test_labels)
     test_results['budgets'] = budget_report(val_logits, test_logits, test_labels, budgets)
+    test_results['feature_set'] = cfg.get('feature_set', 'node')
 
     os.makedirs(exp_dir, exist_ok=True)
     with open(os.path.join(exp_dir, 'config.json'), 'w') as f:
@@ -97,6 +137,9 @@ def run_experiment(x, y, masks, cfg, exp_dir):
         json.dump({'best_iteration': best, 'val': val_metrics}, f, indent=4)
     with open(os.path.join(exp_dir, 'test_results.json'), 'w') as f:
         json.dump(test_results, f, indent=4)
+    # Per-row scores on the test split, so paired bootstrap comparisons use identical rows.
+    np.savez(os.path.join(exp_dir, 'test_scores.npz'),
+             scores=test_logits.numpy(), labels=test_labels.numpy())
 
     print(f"best_iteration={best}")
     print(f"validation PR-AUC {val_metrics['pr_auc']:.4f}, ROC-AUC {val_metrics['roc_auc']:.4f}")
@@ -108,8 +151,10 @@ def run_experiment(x, y, masks, cfg, exp_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="LightGBM tabular baseline (no graph)")
+    parser = argparse.ArgumentParser(description="LightGBM tabular baseline")
     parser.add_argument('--config', type=str, required=True)
+    parser.add_argument('--raw_dir', type=str, default=os.path.join('data', 'raw'),
+                        help="Raw IEEE-CIS folder, needed when feature_set is 'causal'.")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
@@ -119,6 +164,9 @@ def main():
     cfg.setdefault('early_stopping_rounds', 100)
     cfg.setdefault('run_name', 'lgbm_tabular')
     cfg.setdefault('graph', 'causal')
+    cfg.setdefault('feature_set', 'node')
+    if cfg['feature_set'] not in ('node', 'causal'):
+        raise ValueError(f"feature_set must be 'node' or 'causal', got {cfg['feature_set']!r}")
 
     data_path = os.path.join('data', 'processed', f"graph_{cfg['graph']}.pt")
     if not os.path.exists(data_path):
@@ -131,8 +179,16 @@ def main():
         'val': data.val_mask.cpu().numpy(),
         'test': data.test_mask.cpu().numpy(),
     }
-    print(f"Loaded {x.shape[0]} transactions x {x.shape[1]} features (edges ignored).")
 
+    if cfg['feature_set'] == 'causal':
+        extra = causal_entity_features(args.raw_dir)
+        if len(extra) != x.shape[0]:
+            raise ValueError(f"Feature rows ({len(extra)}) do not match graph rows ({x.shape[0]}).")
+        x = np.hstack([x, extra.to_numpy(dtype=np.float32)])
+        print(f"Added {extra.shape[1]} causal entity-history features.")
+
+    print(f"Loaded {x.shape[0]} transactions x {x.shape[1]} features "
+          f"(feature_set={cfg['feature_set']}, edges ignored).")
     run_experiment(x, y, masks, cfg, os.path.join('experiments', cfg['run_name']))
 
 

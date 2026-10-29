@@ -58,22 +58,22 @@ class FraudCamouflageGNN(nn.Module):
 
     - score_head: a small MLP on each node's own input features (no graph)
       that predicts a fraud-likelihood score s_v. It is trained by an
-      auxiliary BCE loss on training seed nodes (see train.py), so the score
-      means "fraud-like" rather than being arbitrary.
+      auxiliary BCE loss on training seed nodes (see train.py).
     - trust(u, v) = exp(-|s_u - s_v|), in (0, 1]. Neighbors whose predicted
       scores agree get trust near 1.
     - trust is passed to each GATConv as a 1-dim edge feature. GATConv adds a
       learned per-head term that is linear in the trust value to the attention
       logits, before the LeakyReLU and softmax. Its sign is learned, not
-      constrained; use trust_gains() after training to check that agreeing
-      neighbors are actually favored (gain > 0 for each head).
-
-    Compared with the earlier hand-written version, the score head runs once
-    on the input features (not once per layer on projected features), and the
-    trust term enters the logits before the LeakyReLU rather than after it.
+      constrained; use trust_gains() after training to check the sign.
+    - detach_trust (default True): trust is computed from detached scores, so
+      the main loss does not train score_head. score_head then learns only
+      from the auxiliary loss and its scores keep their fraud-likelihood
+      meaning. detach_trust=False lets the main loss shape the scores too.
+      Choose between the two on validation PR-AUC only.
     """
 
-    def __init__(self, in_channels: int, hidden_channels: int, heads: int = 4, dropout: float = 0.3):
+    def __init__(self, in_channels: int, hidden_channels: int, heads: int = 4,
+                 dropout: float = 0.3, detach_trust: bool = True):
         super().__init__()
         self.score_head = nn.Sequential(
             nn.Linear(in_channels, hidden_channels),
@@ -86,13 +86,15 @@ class FraudCamouflageGNN(nn.Module):
                              dropout=dropout, edge_dim=1)
         self.classifier = nn.Linear(hidden_channels, 1)
         self.dropout = nn.Dropout(dropout)
+        self.detach_trust = detach_trust
         self._node_scores = None
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         node_scores = self.score_head(x).squeeze(-1)  # [num_nodes]
         self._node_scores = node_scores
+        trust_scores = node_scores.detach() if self.detach_trust else node_scores
         src, dst = edge_index[0], edge_index[1]
-        trust = torch.exp(-(node_scores[src] - node_scores[dst]).abs()).unsqueeze(-1)  # [E, 1]
+        trust = torch.exp(-(trust_scores[src] - trust_scores[dst]).abs()).unsqueeze(-1)  # [E, 1]
 
         x = self.conv1(x, edge_index, edge_attr=trust)
         x = F.elu(x)

@@ -21,7 +21,8 @@ def test_models_forward_shape_and_full_gradient_flow():
     models = [
         GraphSAGEModel(8, 16),
         FraudGAT(8, 16, heads=2),
-        FraudCamouflageGNN(8, 16, heads=2),
+        # Undetached trust lets the main loss reach score_head, so full gradient flow holds.
+        FraudCamouflageGNN(8, 16, heads=2, detach_trust=False),
     ]
     for model in models:
         out = model(x, edge_index)
@@ -29,6 +30,24 @@ def test_models_forward_shape_and_full_gradient_flow():
         out.sum().backward()
         for name, p in model.named_parameters():
             assert p.grad is not None, f"{type(model).__name__}.{name} got no gradient"
+
+
+def test_camouflage_detached_score_head_trained_only_by_auxiliary_loss():
+    x, edge_index = _toy_graph()
+    model = FraudCamouflageGNN(8, 16, heads=2, detach_trust=True)
+
+    # With trust detached, the main output must not reach score_head.
+    out = model(x, edge_index)
+    out.sum().backward()
+    for name, p in model.score_head.named_parameters():
+        assert p.grad is None, f"score_head.{name} received main-loss gradient"
+
+    # The auxiliary loss must reach score_head.
+    model.zero_grad()
+    model(x, edge_index)
+    model.auxiliary_node_scores().sum().backward()
+    for name, p in model.score_head.named_parameters():
+        assert p.grad is not None, f"score_head.{name} got no auxiliary gradient"
 
 
 def test_camouflage_auxiliary_scores_are_per_node_and_track_forward():
@@ -82,7 +101,7 @@ def test_trust_gains_shape_matches_heads():
 def test_model_passes_score_agreement_trust_to_attention():
     """The edge feature the model hands to conv1 must be exp(-|s_u - s_v|)."""
     x, edge_index = _toy_graph()
-    model = FraudCamouflageGNN(8, 16, heads=2)
+    model = FraudCamouflageGNN(8, 16, heads=2, detach_trust=False)
     captured = {}
 
     def hook(module, args, kwargs):

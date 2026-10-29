@@ -96,6 +96,8 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     keys = list(always_checked)
     if new_config['model'] in ('gat', 'camouflage'):
         keys += conditional_checked
+    if new_config['model'] == 'camouflage':
+        keys.append('detach_trust')
 
     mismatches = [f"  {k}: old={old_config.get(k)!r} vs new={new_config.get(k)!r}"
                   for k in keys if old_config.get(k) != new_config.get(k)]
@@ -172,7 +174,8 @@ def main():
                          heads=config['heads'], dropout=config['dropout']).to(device)
     else:
         model = FraudCamouflageGNN(in_channels, config['hidden_channels'],
-                                   heads=config['heads'], dropout=config['dropout']).to(device)
+                                   heads=config['heads'], dropout=config['dropout'],
+                                   detach_trust=config.get('detach_trust', True)).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=config['lr'], weight_decay=5e-4)
 
