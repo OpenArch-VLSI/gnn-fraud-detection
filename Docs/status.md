@@ -26,8 +26,9 @@ The project is a graph-based fraud detector on IEEE-CIS data, with LightGBM as a
 | `cdebe6d` | Pre-registered comparison protocol and review budgets (`Docs/decisions.md`) |
 | `b47b614` | Status update with the decisions commit hash |
 | `522d999` | Tuning-grid line added to `Docs/decisions.md` (committed alone, before any final run) |
-| `<to fill>` | Merge identity table before causal entity features (`src/train_tabular.py`) |
-| `<to fill>` | This update: LightGBM results, primary comparator, smoke outcome |
+| `d7ebf67` | Merge identity table before causal entity features (`src/train_tabular.py`) |
+| `d96206b` | Name primary LightGBM comparator and record secondary comparison (`Docs/decisions.md`) |
+| `4395de0` | Record LightGBM baseline results and smoke outcomes (`Docs/status.md`) |
 
 ## LightGBM baselines (first valid runs on the causal graph)
 Run on Kaggle, seed 42, `graph_causal.pt`, `train_tabular.py`. Configs were not changed after these runs.
@@ -40,7 +41,8 @@ Run on Kaggle, seed 42, `graph_causal.pt`, `train_tabular.py`. Configs were not 
 Notes:
 - `lgbm_causal` adds 16 causal entity-history features. They did not raise validation or test PR-AUC. They raised test ROC-AUC and recall at 1%.
 - Both models show a validation-to-test drop of about 0.07 to 0.08 PR-AUC. The drop is shared across feature sets, which points to the test period rather than to either model.
-- Before the GNNs are compared, the test numbers must be copied into `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` from the Kaggle session, and committed.
+- The test numbers were visible when the primary comparator was named, so the report must say so.
+- The result files must be copied into `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` and committed before the GNN comparison.
 
 ## Smoke tests
 - Run on 2026-10-29 in the sweep notebook: one epoch each on the causal graph. All four completed and wrote checkpoints.
@@ -88,12 +90,11 @@ Two things the logs show:
 9. **Kaggle outputs are not in the repo.** LightGBM and GNN results exist only in the Kaggle session until copied. Copy each `test_results.json` and `metrics.json` into the matching `experiments/` folder before committing.
 
 ## Next steps
-1. Commit this status and the decisions update (two commits, see the instructions in the reply).
-2. Copy `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` (JSON files only) from the sweep notebook's output into the local repo, then commit them.
-3. Run the feature-drift check in the `gnn-drift-check` notebook and record the result here.
-4. Delete the `experiments/smoke_*` folders in the sweep notebook.
-5. Run the validation sweep in the sweep notebook: SAGE, GAT and camouflage (both `detach_trust` settings), each at learning rates {0.0003, 0.001, 0.003, 0.01}. Select the best per family by validation PR-AUC only, and apply the screen against 0.6149.
-6. For each family that passes the screen, run the frozen configuration with seeds 42, 123 and 456, then `evaluate.py` once per run.
-7. Run `scripts/paired_bootstrap.py` for each GNN against `lgbm_tabular`, per seed and on the seed average. Run it against `lgbm_causal` as the secondary comparison.
-8. Run the hand-written versus library layer comparison on validation PR-AUC.
-9. Write the report from `experiments/*/test_results.json` and the bootstrap output only.
+1. Copy `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` (JSON files only) from the Kaggle session into the local repo, then commit them.
+2. Run the feature-drift check in the `gnn-drift-check` notebook and record the result here.
+3. Delete the `experiments/smoke_*` folders in the sweep notebook.
+4. Run the validation sweep in the sweep notebook: SAGE, GAT and camouflage (both `detach_trust` settings), each at learning rates {0.0003, 0.001, 0.003, 0.01}. Select the best per family by validation PR-AUC only, and apply the screen against 0.6149.
+5. For each family that passes the screen, run the frozen configuration with seeds 42, 123 and 456, then `evaluate.py` once per run.
+6. Run `scripts/paired_bootstrap.py` for each GNN against `lgbm_tabular`, per seed and on the seed average. Run it against `lgbm_causal` as the secondary comparison.
+7. Run the hand-written versus library layer comparison on validation PR-AUC.
+8. Write the report from `experiments/*/test_results.json` and the bootstrap output only.
