@@ -42,19 +42,31 @@ DEFAULT_PARAMS = {
 ENTITY_COLS = ['card1', 'addr1', 'P_emaildomain', 'DeviceInfo']
 
 
+def load_sorted_frame(raw_dir):
+    """
+    Transactions sorted by time and merged with identity columns, exactly as
+    build_graph.py does, so row i here is row i of the graph.
+    """
+    tx = pd.read_csv(os.path.join(raw_dir, 'train_transaction.csv'))
+    ident = pd.read_csv(os.path.join(raw_dir, 'train_identity.csv'))
+    tx = tx.sort_values('TransactionDT').reset_index(drop=True)
+    return tx.merge(ident, on='TransactionID', how='left').reset_index(drop=True)
+
+
 def causal_entity_features(raw_dir):
     """
     Entity-history features for each transaction, using only EARLIER rows with the
-    same entity value. Rows are sorted by TransactionDT (same order as build_graph.py),
-    and the current row is never included. Returns a frame aligned to the sorted rows.
+    same entity value. Rows follow the same order as build_graph.py, and the current
+    row is never included. Returns a frame aligned to the graph rows.
     """
-    tx = pd.read_csv(os.path.join(raw_dir, 'train_transaction.csv'))
-    tx = tx.sort_values('TransactionDT').reset_index(drop=True)
+    tx = load_sorted_frame(raw_dir)
     amt = np.log1p(tx['TransactionAmt'].astype(float).clip(lower=0))
     t = tx['TransactionDT'].astype(float)
     out = {}
 
     for col in ENTITY_COLS:
+        if col not in tx.columns:
+            raise KeyError(f"Column {col!r} not found after merging identity data.")
         key = tx[col].astype(str).where(tx[col].notna(), 'MISSING')
         prior_n = key.groupby(key).cumcount()
         out[f'{col}_hist_count'] = np.log1p(prior_n)
