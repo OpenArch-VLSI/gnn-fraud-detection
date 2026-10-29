@@ -3,7 +3,7 @@
 Last updated: 2026-10-29. Decisions are in `Docs/decisions.md`.
 
 ## Summary
-The project is a graph-based fraud detector on IEEE-CIS data, with LightGBM as a non-graph baseline and a camouflage-aware GAT as the proposed model. The comparison protocol is pre-registered in `Docs/decisions.md` (commit `cdebe6d`, with the tuning-grid line added in commit `522d999`). Both LightGBM baselines have now been run on the causal graph. No GNN has been trained on the full protocol yet. Earlier numbers came from a pipeline that has since changed.
+The project is a graph-based fraud detector on IEEE-CIS data, with LightGBM as a non-graph baseline and a camouflage-aware GAT as the proposed model. The comparison protocol is pre-registered in `Docs/decisions.md` (commit `cdebe6d`, with the tuning-grid line added in commit `522d999`). Both LightGBM baselines have now been run on the causal graph, and their result files are committed. No GNN has been trained on the full protocol yet. Earlier numbers came from a pipeline that has since changed.
 
 ## Phase status
 - **Phase 0 (setup, repo):** done. `.gitignore` anchors the data rule to `/data/`, ignores checkpoints by pattern, and ignores `/*.zip`.
@@ -11,7 +11,7 @@ The project is a graph-based fraud detector on IEEE-CIS data, with LightGBM as a
 - **Phase 2 (graph construction):** done. Built on Kaggle: `graph_causal.pt` and `graph_full.pt` written, 590,540 transactions, 436 node features. Causal direction check passed (0 edges from later to earlier transactions).
   - Provenance: the graph was built by Kaggle notebook `notebookec7033b03b` (2026-10-28), from code version 21366554, which matches `src/data/build_graph.py` at commit `2e80f6f` or later.
 - **Phase 3 (layers):** models use PyTorch Geometric layers. Hand-written SAGE and GAT remain as reference code. Their equivalence test with the library layers is not yet written.
-- **Phase 4 (baselines):** LightGBM done for both feature sets (see table below). GAT and SAGE sweeps are not yet run on the current pipeline.
+- **Phase 4 (baselines):** LightGBM done for both feature sets, with result files and test scores committed (see table below). GAT and SAGE sweeps are not yet run on the current pipeline.
 - **Phase 5 (training harness):** rewritten. Checkpoints are selected on validation PR-AUC only. Validation sampling is repeatable. Test evaluation runs once per run, saves per-row test scores, and reports precision and recall at review budgets of 1%, 5% and 10%.
 - **Phase 6 (literature):** `report/related_work.md` is written.
 - **Phase 7 (camouflage model):** `FraudCamouflageGNN` in `src/models/models.py` is the canonical version, with `detach_trust` (default true). Tests cover the detached and undetached gradient paths. Its only earlier full-graph run, of the removed hand-written version, collapsed to ROC-AUC about 0.5. The new version has been smoke-tested (one epoch) but not trained on the protocol.
@@ -29,6 +29,9 @@ The project is a graph-based fraud detector on IEEE-CIS data, with LightGBM as a
 | `d7ebf67` | Merge identity table before causal entity features (`src/train_tabular.py`) |
 | `d96206b` | Name primary LightGBM comparator and record secondary comparison (`Docs/decisions.md`) |
 | `4395de0` | Record LightGBM baseline results and smoke outcomes (`Docs/status.md`) |
+| `c9da74b` | Record commit hashes for LightGBM baseline stage (`Docs/status.md`) |
+| `1887d7f` | Add LightGBM tabular baseline results and test scores (`experiments/lgbm_tabular/`) |
+| `18c1427` | Add LightGBM causal baseline results and test scores (`experiments/lgbm_causal/`) |
 
 ## LightGBM baselines (first valid runs on the causal graph)
 Run on Kaggle, seed 42, `graph_causal.pt`, `train_tabular.py`. Configs were not changed after these runs.
@@ -42,7 +45,9 @@ Notes:
 - `lgbm_causal` adds 16 causal entity-history features. They did not raise validation or test PR-AUC. They raised test ROC-AUC and recall at 1%.
 - Both models show a validation-to-test drop of about 0.07 to 0.08 PR-AUC. The drop is shared across feature sets, which points to the test period rather than to either model.
 - The test numbers were visible when the primary comparator was named, so the report must say so.
-- The result files must be copied into `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` and committed before the GNN comparison.
+- `lgbm_tabular` was run twice. The first run crashed after writing its printed results but before writing its folder, because the identity-table merge was missing. It was rerun in a new Kaggle session with an identical configuration, and it reproduced every printed number exactly (validation PR-AUC 0.6149, test PR-AUC 0.5369). The committed files come from the rerun.
+- The committed folders hold `config.json`, `metrics.json`, `test_results.json` and `test_scores.npz`. `model.txt` is not committed.
+- The test scores in both folders have 88,581 rows and 3,083 fraud rows, so the paired bootstrap can compare them row by row.
 
 ## Smoke tests
 - Run on 2026-10-29 in the sweep notebook: one epoch each on the causal graph. All four completed and wrote checkpoints.
@@ -87,14 +92,14 @@ Two things the logs show:
 6. **Review budget is an assumption.** The 1%, 5% and 10% budgets were chosen on 2026-10-28, before any budget-level result existed. At 1% of the test split (about 886 reviews, roughly 31 fraud on average), precision is noisy, so intervals must be reported with it.
 7. **Loss weights and `aux_loss_weight` are not tuned.** This is a deliberate limit for the deadline, stated in the decisions file. It should appear in the report as a limitation.
 8. **Commit identity.** `Docs/decisions.md` asks for a placeholder identity on new commits, but recent commits use the identity in the local git config. Either reword that entry or use the placeholder from now on.
-9. **Kaggle outputs are not in the repo.** LightGBM and GNN results exist only in the Kaggle session until copied. Copy each `test_results.json` and `metrics.json` into the matching `experiments/` folder before committing.
+9. **Kaggle outputs for the GNN runs are not yet in the repo.** The LightGBM result files are committed. Each GNN run's `test_results.json`, `metrics.json`, `config.json` and `test_scores.npz` must be copied into its `experiments/` folder and committed before the bootstrap.
 
 ## Next steps
-1. Copy `experiments/lgbm_tabular/` and `experiments/lgbm_causal/` (JSON files only) from the Kaggle session into the local repo, then commit them.
-2. Run the feature-drift check in the `gnn-drift-check` notebook and record the result here.
-3. Delete the `experiments/smoke_*` folders in the sweep notebook.
-4. Run the validation sweep in the sweep notebook: SAGE, GAT and camouflage (both `detach_trust` settings), each at learning rates {0.0003, 0.001, 0.003, 0.01}. Select the best per family by validation PR-AUC only, and apply the screen against 0.6149.
-5. For each family that passes the screen, run the frozen configuration with seeds 42, 123 and 456, then `evaluate.py` once per run.
+1. Run the feature-drift check in the `gnn-drift-check` notebook and record the result here.
+2. Delete the `experiments/smoke_*` folders in the sweep notebook.
+3. Run the validation sweep in the sweep notebook: SAGE, GAT and camouflage (both `detach_trust` settings), each at learning rates {0.0003, 0.001, 0.003, 0.01}. Select the best per family by validation PR-AUC only, and apply the screen against 0.6149.
+4. For each family that passes the screen, run the frozen configuration with seeds 42, 123 and 456, then `evaluate.py` once per run.
+5. Commit each run's result files, as in item 9 above.
 6. Run `scripts/paired_bootstrap.py` for each GNN against `lgbm_tabular`, per seed and on the seed average. Run it against `lgbm_causal` as the secondary comparison.
 7. Run the hand-written versus library layer comparison on validation PR-AUC.
 8. Write the report from `experiments/*/test_results.json` and the bootstrap output only.
