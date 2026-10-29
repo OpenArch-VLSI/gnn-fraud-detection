@@ -1,0 +1,30 @@
+{
+    "roc_auc": 0.8972711192057597,
+    "pr_auc": 0.5288126942478311,
+    "f1": 0.5034260378879484,
+    "recall": 0.40512487836522865,
+    "budgets": [
+        {
+            "budget": 0.01,
+            "threshold": 2.531014936695234,
+            "precision_at_budget": 0.8886554621848739,
+            "recall_at_budget": 0.27440804411287706,
+            "flagged_fraction": 0.010747225703028867
+        },
+        {
+            "budget": 0.05,
+            "threshold": -2.154996439181024,
+            "precision_at_budget": 0.35451179107386477,
+            "recall_at_budget": 0.5900097307817062,
+            "flagged_fraction": 0.057924385590589406
+        },
+        {
+            "budget": 0.1,
+            "threshold": -3.245082267111506,
+            "precision_at_budget": 0.22133790046342938,
+            "recall_at_budget": 0.7126175802789491,
+            "flagged_fraction": 0.11205563269775685
+        }
+    ],
+    "feature_set": "causal"
+}
