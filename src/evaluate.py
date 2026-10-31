@@ -98,6 +98,13 @@ def main():
     data = torch.load(os.path.join('data', 'processed', f'graph_{graph_name}.pt'), weights_only=False)
     print(f"Graph: {graph_name}")
 
+    leakage_indices_path = os.path.join(args.exp_dir, 'leakage_test_indices.pt')
+    if os.path.exists(leakage_indices_path):
+        leakage_indices = torch.load(leakage_indices_path, map_location='cpu', weights_only=False).long()
+    else:
+        leakage_indices = torch.empty(0, dtype=torch.long)
+    leakage_index_set = set(leakage_indices.tolist())
+
     model = build_model(config, data.x.size(1)).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model'])
@@ -109,6 +116,28 @@ def main():
     results = compute_metrics(test_logits, test_labels)
     results['graph'] = graph_name
     results['budgets'] = budget_report(val_logits, test_logits, test_labels, args.budgets)
+
+    # Separate the test nodes whose labels were deliberately exposed during
+    # training from the remaining test nodes. Test predictions are returned in
+    # ascending global node order because test_mask is a boolean mask.
+    test_global_ids = torch.where(data.test_mask)[0]
+    exposed_mask = torch.tensor(
+        [int(node_id) in leakage_index_set for node_id in test_global_ids.tolist()],
+        dtype=torch.bool
+    )
+    results['leakage_experiment'] = {
+        'enabled': bool(len(leakage_indices)),
+        'configured_test_fraction': float(config.get('leakage_test_fraction', 0.0)),
+        'exposed_test_nodes': int(exposed_mask.sum()),
+        'total_test_nodes': int(len(test_global_ids)),
+        'exposed_fraction_actual': float(exposed_mask.float().mean()) if len(exposed_mask) else 0.0,
+        'exposed_subset_metrics': compute_metrics(test_logits[exposed_mask], test_labels[exposed_mask])
+            if exposed_mask.any() else None,
+        'unexposed_subset_metrics': compute_metrics(test_logits[~exposed_mask], test_labels[~exposed_mask])
+            if (~exposed_mask).any() else None,
+        'warning': ('Leakage-experiment scores are contaminated because selected test labels '
+                    'were used for training; do not report them as unseen-data generalization.')
+    }
 
     # Diagnostics. Validation numbers are recomputed here so they can be checked
     # against the value logged during training. They do not affect the test numbers.
@@ -126,6 +155,13 @@ def main():
     print("Test results:")
     print(f"  PR-AUC:  {results['pr_auc']:.4f}")
     print(f"  ROC-AUC: {results['roc_auc']:.4f}")
+    leak = results['leakage_experiment']
+    print(f"Leakage experiment: {leak['exposed_test_nodes']}/{leak['total_test_nodes']} "
+          f"test labels exposed ({leak['exposed_fraction_actual']:.1%})")
+    if leak['exposed_subset_metrics'] is not None:
+        print(f"  Exposed-subset PR-AUC:   {leak['exposed_subset_metrics']['pr_auc']:.4f}")
+    if leak['unexposed_subset_metrics'] is not None:
+        print(f"  Unexposed-subset PR-AUC: {leak['unexposed_subset_metrics']['pr_auc']:.4f}")
     for row in results['budgets']:
         print(f"  budget {row['budget']:.0%}: precision {row['precision_at_budget']:.4f}, "
               f"recall {row['recall_at_budget']:.4f}, flagged {row['flagged_fraction']:.2%}")
@@ -133,7 +169,8 @@ def main():
     with open(out_path, 'w') as f:
         json.dump(results, f, indent=4)
     # Per-row test scores, with the same row order as the graph test mask.
-    np.savez(scores_path, scores=test_logits.numpy(), labels=test_labels.numpy())
+    np.savez(scores_path, scores=test_logits.numpy(), labels=test_labels.numpy(),
+             global_node_ids=test_global_ids.numpy(), leakage_exposed=exposed_mask.numpy())
     print(f"Saved {out_path} and {scores_path}")
 
 
