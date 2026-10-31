@@ -160,11 +160,23 @@ def main():
         with open(old_config_path, 'r') as f:
             validate_resume_config(json.load(f), config)
 
+    # Refuse to overwrite an existing experiment. This protects checkpoints,
+    # metrics, and test results from accidental replacement on reruns.
+    run_name = str(config['run_name'])
+    if run_name in ('', '.', '..') or os.path.basename(run_name) != run_name:
+        raise ValueError("run_name must be a simple folder name, not a path.")
+    exp_dir = os.path.join('experiments', run_name)
+    if os.path.isdir(exp_dir) and os.listdir(exp_dir):
+        raise FileExistsError(
+            f"Experiment directory already exists and is not empty: {exp_dir}. "
+            "Choose a new --run_name. Existing experiment outputs are never "
+            "overwritten automatically."
+        )
+
     set_seed(config['seed'])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    exp_dir = os.path.join('experiments', config['run_name'])
     os.makedirs(exp_dir, exist_ok=True)
     with open(os.path.join(exp_dir, 'config.json'), 'w') as f:
         json.dump(config, f, indent=4)
