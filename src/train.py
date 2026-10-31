@@ -4,6 +4,7 @@ import json
 import sys
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -54,6 +55,10 @@ def build_parser(suppress_defaults=False):
                         help="Sigmoid temperature of the smooth-AP surrogate, in logit units.")
     parser.add_argument('--resume_dir', type=str, default=d if suppress_defaults else None,
                         help="Previous exp_dir containing last_model.pt, metrics.json and config.json.")
+    parser.add_argument('--leakage_test_fraction', type=float,
+                        default=d if suppress_defaults else 0.0,
+                        help=("Leakage experiment only: fraction of test nodes whose labels "
+                              "are deliberately added to training seeds. Default 0.0."))
     return parser
 
 
@@ -73,6 +78,10 @@ def load_config(args):
 
     if config['graph'] not in GRAPH_CHOICES:
         raise ValueError(f"graph must be one of {GRAPH_CHOICES}, got {config['graph']!r}")
+    leak_fraction = float(config.get('leakage_test_fraction', 0.0))
+    if not 0.0 <= leak_fraction <= 1.0:
+        raise ValueError("leakage_test_fraction must be between 0.0 and 1.0")
+    config['leakage_test_fraction'] = leak_fraction
     if config.get('selection_metric', SELECTION_METRIC) != SELECTION_METRIC:
         raise ValueError(f"selection_metric must be '{SELECTION_METRIC}', "
                          f"got {config.get('selection_metric')!r}")
@@ -90,7 +99,8 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     Checkpoints written before a field existed have None for it and are refused.
     """
     always_checked = ['model', 'graph', 'hidden_channels', 'rank_loss_weight',
-                      'ap_loss_weight', 'ap_temperature', 'selection_metric']
+                      'ap_loss_weight', 'ap_temperature', 'selection_metric',
+                      'leakage_test_fraction']
     conditional_checked = ['heads', 'dropout']
 
     keys = list(always_checked)
@@ -179,17 +189,39 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=config['lr'], weight_decay=5e-4)
 
-    train_labels = data.y[data.train_mask]
+    # Normal training nodes plus a reproducibly selected fraction of test nodes.
+    # This intentionally leaks labels for a controlled experiment; the resulting
+    # test PR-AUC is not an unbiased estimate of performance on unseen labels.
+    training_mask = data.train_mask.clone()
+    test_indices = torch.where(data.test_mask)[0]
+    leak_fraction = float(config.get('leakage_test_fraction', 0.0))
+    n_leak = int(round(leak_fraction * len(test_indices)))
+    if n_leak > 0:
+        generator = torch.Generator(device='cpu')
+        generator.manual_seed(int(config['seed']) + 901)
+        chosen = torch.randperm(len(test_indices), generator=generator)[:n_leak]
+        leakage_indices = test_indices[chosen]
+        training_mask[leakage_indices] = True
+    else:
+        leakage_indices = torch.empty(0, dtype=torch.long)
+
+    torch.save(leakage_indices.cpu(),
+               os.path.join(exp_dir, 'leakage_test_indices.pt'))
+    train_labels = data.y[training_mask]
     num_pos = train_labels.sum().item()
     num_neg = len(train_labels) - num_pos
-    pos_weight = torch.tensor([num_neg / (num_pos + 1e-6)], device=device)
+    pos_weight = torch.tensor([num_neg / max(num_pos, 1)], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     aux_loss_weight = config.get('aux_loss_weight', 0.3)
     is_camouflage_model = (config['model'] == 'camouflage')
 
+    print(f"Leakage experiment: fraction={leak_fraction:.3f}; "
+          f"test labels exposed to training={len(leakage_indices):,}/{len(test_indices):,}")
+    print(f"Training seed nodes total: {int(training_mask.sum()):,}")
+
     train_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=1024,
-                                  input_nodes=data.train_mask, shuffle=True, num_workers=0)
+                                  input_nodes=training_mask, shuffle=True, num_workers=0)
     val_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=2048,
                                 input_nodes=data.val_mask, shuffle=False, num_workers=0)
 
