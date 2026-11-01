@@ -44,20 +44,53 @@ def build_model(config, in_channels):
 
 @torch.no_grad()
 def predict(model, data, mask, device):
-    """Logits and labels for the nodes in `mask`, with repeatable neighbour sampling."""
+    """Predict target nodes with repeatable neighbor sampling and progress logs."""
+    import time
+
     model.eval()
+    total_nodes = int(mask.sum().item())
+    start_time = time.time()
+
+    print(f"Starting prediction for {total_nodes:,} target nodes.", flush=True)
+
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(SAMPLE_SEED)
-        loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=2048,
-                                input_nodes=mask, shuffle=False, num_workers=0)
+        loader = NeighborLoader(
+            data,
+            num_neighbors=FANOUT,
+            batch_size=2048,
+            input_nodes=mask,
+            shuffle=False,
+            num_workers=0
+        )
+
         logits, labels = [], []
-        for batch in loader:
+        processed = 0
+
+        for batch_idx, batch in enumerate(loader, start=1):
             batch = batch.to(device)
             out = model(batch.x, batch.edge_index).squeeze(-1)
+
+            # Keep predictions and labels for target nodes only, not sampled neighbors.
             logits.append(out[:batch.batch_size].cpu())
             labels.append(batch.y[:batch.batch_size].cpu())
-    return torch.cat(logits), torch.cat(labels)
+            processed += batch.batch_size
 
+            if batch_idx == 1 or batch_idx % 5 == 0 or processed >= total_nodes:
+                elapsed = time.time() - start_time
+                rate = processed / elapsed if elapsed > 0 else 0.0
+                percentage = 100.0 * processed / max(total_nodes, 1)
+
+                print(
+                    f"  Batch {batch_idx}: "
+                    f"{processed:,}/{total_nodes:,} target nodes "
+                    f"({percentage:.1f}%), "
+                    f"elapsed={elapsed:.1f}s, "
+                    f"rate={rate:.1f} target nodes/s",
+                    flush=True
+                )
+
+    return torch.cat(logits), torch.cat(labels)
 
 def best_training_epoch(exp_dir):
     """The epoch training saved as best, read from metrics.json. None if unavailable."""
