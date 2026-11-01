@@ -2,6 +2,7 @@ import os
 import argparse
 import json
 import sys
+import shutil
 from datetime import datetime
 
 import numpy as np
@@ -59,6 +60,10 @@ def build_parser(suppress_defaults=False):
                         default=d if suppress_defaults else 0.0,
                         help=("Leakage experiment only: fraction of test nodes whose labels "
                               "are deliberately added to training seeds. Default 0.0."))
+    parser.add_argument('--contaminated_same_label_eval', action='store_true',
+                        default=d if suppress_defaults else False,
+                        help=('Deliberately train on every original test label and score those '
+                              'same nodes. This is not a generalization evaluation.'))
     return parser
 
 
@@ -82,6 +87,23 @@ def load_config(args):
     if not 0.0 <= leak_fraction <= 1.0:
         raise ValueError("leakage_test_fraction must be between 0.0 and 1.0")
     config['leakage_test_fraction'] = leak_fraction
+    contaminated = bool(config.get('contaminated_same_label_eval', False))
+    config['contaminated_same_label_eval'] = contaminated
+    if contaminated:
+        validate_contaminated_config(config)
+        config.update({
+            'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
+            'training_splits': ['train', 'test'],
+            'evaluation_split': 'test',
+            'valid_generalization_estimate': False,
+        })
+    else:
+        contamination_fields = ('evaluation_status', 'training_splits', 'evaluation_split',
+                                'valid_generalization_estimate')
+        if leak_fraction == 1.0:
+            raise ValueError("--leakage_test_fraction 1.0 requires --contaminated_same_label_eval")
+        if any(field in config for field in contamination_fields):
+            raise ValueError("Contamination metadata requires --contaminated_same_label_eval")
     if config.get('selection_metric', SELECTION_METRIC) != SELECTION_METRIC:
         raise ValueError(f"selection_metric must be '{SELECTION_METRIC}', "
                          f"got {config.get('selection_metric')!r}")
@@ -93,6 +115,77 @@ def load_config(args):
     return config
 
 
+def validate_contaminated_config(config):
+    """Validate the deliberately contaminated full train+test mode."""
+    if float(config.get('leakage_test_fraction', 0.0)) != 1.0:
+        raise ValueError("--contaminated_same_label_eval requires --leakage_test_fraction 1.0")
+    if config.get('graph') != 'causal':
+        raise ValueError("--contaminated_same_label_eval requires --graph causal")
+    if not str(config.get('run_name') or '').startswith('CONTAMINATED_'):
+        raise ValueError("--contaminated_same_label_eval requires a --run_name beginning with CONTAMINATED_")
+    required = {
+        'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
+        'training_splits': ['train', 'test'],
+        'evaluation_split': 'test',
+        'valid_generalization_estimate': False,
+    }
+    contradictions = [key for key, expected in required.items()
+                      if key in config and config[key] != expected]
+    if contradictions:
+        raise ValueError("Contaminated configuration has contradictory metadata: "
+                         + ', '.join(contradictions))
+
+
+def build_training_mask(data, config):
+    """Return training seeds and test IDs whose labels are deliberately exposed."""
+    test_indices = torch.where(data.test_mask)[0]
+    if config.get('contaminated_same_label_eval', False):
+        training_mask = data.train_mask | data.test_mask
+        if torch.any(training_mask & data.val_mask):
+            raise ValueError("Validation nodes must not be included in contaminated full-mix training.")
+        return training_mask, test_indices
+
+    training_mask = data.train_mask.clone()
+    leak_fraction = float(config.get('leakage_test_fraction', 0.0))
+    n_leak = int(round(leak_fraction * len(test_indices)))
+    if n_leak == 0:
+        return training_mask, torch.empty(0, dtype=torch.long)
+    generator = torch.Generator(device='cpu')
+    generator.manual_seed(int(config['seed']) + 901)
+    chosen = torch.randperm(len(test_indices), generator=generator)[:n_leak]
+    leakage_indices = test_indices[chosen]
+    training_mask[leakage_indices] = True
+    return training_mask, leakage_indices
+
+
+def ensure_resumed_best_model(resume_dir, exp_dir, checkpoint):
+    """Preserve a known best checkpoint, or explicitly document an unrecoverable fallback."""
+    old_best_path = os.path.join(resume_dir, 'best_model.pt')
+    destination = os.path.join(exp_dir, 'best_model.pt')
+    if os.path.exists(old_best_path):
+        shutil.copy2(old_best_path, destination)
+        return {'recovered': True, 'method': 'copied_prior_best_model'}
+    # The training design retains only ``last_model.pt`` and metric rows, not a
+    # checkpoint per epoch; an absent historical best cannot be reconstructed.
+    # Make the fallback traceable instead of silently claiming it was historical best.
+    fallback = dict(checkpoint)
+    fallback['checkpoint_recovery'] = (
+        'Historical best_model.pt was unavailable; this is the resumed last_model.pt, '
+        'not a reconstructed historical selection optimum.')
+    torch.save(fallback, destination)
+    return {'recovered': False, 'method': 'last_model_fallback_unrecoverable_history'}
+
+
+def selection_metric_name(config):
+    return ('contaminated_test_pr_auc' if config.get('contaminated_same_label_eval', False)
+            else 'val_pr_auc')
+
+
+def should_save_checkpoint(best_selection_score, selection_value):
+    """The first finite epoch is a valid best checkpoint, including an AP of zero."""
+    return best_selection_score is None or selection_value > best_selection_score
+
+
 def validate_resume_config(old_config: dict, new_config: dict) -> None:
     """
     Refuses to resume if a model-defining or objective-defining field differs.
@@ -100,7 +193,7 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     """
     always_checked = ['model', 'graph', 'hidden_channels', 'rank_loss_weight',
                       'ap_loss_weight', 'ap_temperature', 'selection_metric',
-                      'leakage_test_fraction']
+                      'leakage_test_fraction', 'contaminated_same_label_eval']
     conditional_checked = ['heads', 'dropout']
 
     keys = list(always_checked)
@@ -109,8 +202,14 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     if new_config['model'] == 'camouflage':
         keys.append('detach_trust')
 
+    def value_for_compare(key, config):
+        # Older clean checkpoints predate this flag; their absence means False.
+        if key == 'contaminated_same_label_eval':
+            return bool(config.get(key, False))
+        return config.get(key)
+
     mismatches = [f"  {k}: old={old_config.get(k)!r} vs new={new_config.get(k)!r}"
-                  for k in keys if old_config.get(k) != new_config.get(k)]
+                  for k in keys if value_for_compare(k, old_config) != value_for_compare(k, new_config)]
     if mismatches:
         raise ValueError("Cannot resume: these config fields differ from the checkpoint:\n"
                          + "\n".join(mismatches))
@@ -204,18 +303,9 @@ def main():
     # Normal training nodes plus a reproducibly selected fraction of test nodes.
     # This intentionally leaks labels for a controlled experiment; the resulting
     # test PR-AUC is not an unbiased estimate of performance on unseen labels.
-    training_mask = data.train_mask.clone()
+    training_mask, leakage_indices = build_training_mask(data, config)
     test_indices = torch.where(data.test_mask)[0]
     leak_fraction = float(config.get('leakage_test_fraction', 0.0))
-    n_leak = int(round(leak_fraction * len(test_indices)))
-    if n_leak > 0:
-        generator = torch.Generator(device='cpu')
-        generator.manual_seed(int(config['seed']) + 901)
-        chosen = torch.randperm(len(test_indices), generator=generator)[:n_leak]
-        leakage_indices = test_indices[chosen]
-        training_mask[leakage_indices] = True
-    else:
-        leakage_indices = torch.empty(0, dtype=torch.long)
 
     torch.save(leakage_indices.cpu(),
                os.path.join(exp_dir, 'leakage_test_indices.pt'))
@@ -231,14 +321,21 @@ def main():
     print(f"Leakage experiment: fraction={leak_fraction:.3f}; "
           f"test labels exposed to training={len(leakage_indices):,}/{len(test_indices):,}")
     print(f"Training seed nodes total: {int(training_mask.sum()):,}")
+    if config['contaminated_same_label_eval']:
+        print("WARNING: CONTAMINATED_SAME_LABEL_EVALUATION.")
+        print("All original test labels are used for training and the same test nodes will be evaluated.")
+        print("Reported PR-AUC is not a generalization estimate.")
 
     train_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=1024,
                                   input_nodes=training_mask, shuffle=True, num_workers=0)
     val_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=2048,
                                 input_nodes=data.val_mask, shuffle=False, num_workers=0)
+    contaminated_test_loader = NeighborLoader(
+        data, num_neighbors=FANOUT, batch_size=2048, input_nodes=data.test_mask,
+        shuffle=False, num_workers=0) if config['contaminated_same_label_eval'] else None
 
     start_epoch = 1
-    best_val_score = 0.0
+    best_selection_score = None
     metrics_log = []
     epochs_without_improvement = 0
     patience = config.get('patience', 10)
@@ -251,13 +348,23 @@ def main():
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         start_epoch = checkpoint['epoch'] + 1
-        best_val_score = checkpoint.get('best_val_score', 0.0)
+        best_selection_score = checkpoint.get(
+            'best_selection_score', checkpoint.get('best_val_score'))
         epochs_without_improvement = checkpoint.get('epochs_without_improvement', 0)
         old_metrics_path = os.path.join(config['resume_dir'], 'metrics.json')
         if os.path.exists(old_metrics_path):
             with open(old_metrics_path, 'r') as f:
                 metrics_log = json.load(f)
-        print(f"Resumed at epoch {start_epoch} (best validation PR-AUC so far: {best_val_score:.4f})")
+        # A new resume directory must be evaluable even if no future epoch improves.
+        recovery = ensure_resumed_best_model(config['resume_dir'], exp_dir, checkpoint)
+        with open(os.path.join(exp_dir, 'resume_metadata.json'), 'w') as f:
+            json.dump({'checkpoint_recovery': recovery,
+                       'selection_metric': selection_metric_name(config)}, f, indent=4)
+        previous = 'unknown' if best_selection_score is None else f'{best_selection_score:.4f}'
+        print(f"Resumed at epoch {start_epoch} (best {selection_metric_name(config)} so far: {previous})")
+        if not recovery['recovered']:
+            print("WARNING: historical best_model.pt was unavailable; fallback checkpoint is documented "
+                  "and is not asserted to be the historical optimum.")
 
     print("Starting training...")
     for epoch in range(start_epoch, config['epochs'] + 1):
@@ -286,19 +393,36 @@ def main():
 
         avg_val_loss, val_metrics = validate(model, val_loader, criterion, config, device)
         val_score = selection_score(val_metrics)
+        contaminated_metrics = None
+        if contaminated_test_loader is not None:
+            _, contaminated_metrics = validate(
+                model, contaminated_test_loader, criterion, config, device)
+            selection_value = contaminated_metrics['pr_auc']
+        else:
+            selection_value = val_score
 
         print(f"Epoch {epoch:03d} | Train loss {avg_train_loss:.4f} | Val loss {avg_val_loss:.4f} | "
               f"Val PR-AUC {val_metrics['pr_auc']:.4f} | Val ROC-AUC {val_metrics['roc_auc']:.4f}")
+        if contaminated_metrics is not None:
+            print(f"  CONTAMINATED_SAME_LABEL_EVALUATION test PR-AUC "
+                  f"{contaminated_metrics['pr_auc']:.4f}; used solely for contaminated checkpoint selection.")
 
         metrics_log.append({'epoch': epoch, 'train_loss': avg_train_loss,
-                            'val_loss': avg_val_loss, 'val_score': val_score, **val_metrics})
+                            'val_loss': avg_val_loss, 'val_score': val_score,
+                            'selection_metric': selection_metric_name(config),
+                            'selection_score': selection_value, **val_metrics,
+                            **({'contaminated_test_pr_auc': contaminated_metrics['pr_auc'],
+                                'contaminated_test_roc_auc': contaminated_metrics['roc_auc']}
+                               if contaminated_metrics is not None else {})})
         with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
             json.dump(metrics_log, f, indent=4)
 
-        if val_score > best_val_score:
-            best_val_score = val_score
+        if should_save_checkpoint(best_selection_score, selection_value):
+            best_selection_score = selection_value
             torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
-                        'epoch': epoch, 'best_val_score': best_val_score},
+                        'epoch': epoch, 'best_selection_score': best_selection_score,
+                        'selection_metric': selection_metric_name(config),
+                        'contaminated_test_pr_auc': (contaminated_metrics or {}).get('pr_auc')},
                        os.path.join(exp_dir, 'best_model.pt'))
             print("  --> saved new best model")
             epochs_without_improvement = 0
@@ -306,13 +430,14 @@ def main():
             epochs_without_improvement += 1
 
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
-                    'epoch': epoch, 'best_val_score': best_val_score,
+                    'epoch': epoch, 'best_selection_score': best_selection_score,
+                    'selection_metric': selection_metric_name(config),
                     'epochs_without_improvement': epochs_without_improvement},
                    os.path.join(exp_dir, 'last_model.pt'))
 
         if patience > 0 and epochs_without_improvement >= patience:
-            print(f"  --> no validation PR-AUC improvement for {patience} epochs; "
-                  f"stopping at epoch {epoch}/{config['epochs']} (best {best_val_score:.4f}).")
+            print(f"  --> no checkpoint-selection metric improvement for {patience} epochs; "
+                  f"stopping at epoch {epoch}/{config['epochs']} (best {best_selection_score:.4f}).")
             break
 
     with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:

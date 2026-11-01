@@ -101,10 +101,72 @@ def best_training_epoch(exp_dir):
         log = json.load(f)
     if not log:
         return None
-    best = max(log, key=lambda row: row['val_score'])
+    metric_key = ('contaminated_test_pr_auc'
+                  if log[0].get('selection_metric') == 'contaminated_test_pr_auc'
+                  or log[0].get('contaminated_test_pr_auc') is not None else 'val_score')
+    best = max(log, key=lambda row: row[metric_key])
     return {'epoch': best['epoch'],
             'logged_val_pr_auc': best['pr_auc'],
+            'selection_metric': metric_key,
+            'contaminated_test_pr_auc': best.get('contaminated_test_pr_auc'),
             'epochs_logged': len(log)}
+
+
+def validate_contamination_metadata(config, leakage_indices, test_global_ids):
+    """Reject a purported full-mix run unless its provenance is complete and exact."""
+    required = {
+        'contaminated_same_label_eval': True,
+        'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
+        'leakage_test_fraction': 1.0,
+        'training_splits': ['train', 'test'],
+        'evaluation_split': 'test',
+        'valid_generalization_estimate': False,
+    }
+    mismatches = [key for key, value in required.items() if config.get(key) != value]
+    if config.get('graph') != 'causal':
+        mismatches.append('graph')
+    if mismatches:
+        raise ValueError("Inconsistent CONTAMINATED_SAME_LABEL_EVALUATION metadata: "
+                         + ", ".join(mismatches))
+    if set(leakage_indices.tolist()) != set(test_global_ids.tolist()) or len(leakage_indices) != len(test_global_ids):
+        raise ValueError("CONTAMINATED_SAME_LABEL_EVALUATION requires every original test node "
+                         "in leakage_test_indices.pt exactly once.")
+
+
+def is_contaminated_same_label_config(config):
+    """Classify full-mix provenance without allowing ambiguous 100% leakage runs."""
+    flag = config.get('contaminated_same_label_eval', False)
+    status = config.get('evaluation_status')
+    fraction = float(config.get('leakage_test_fraction', 0.0))
+    claims_contamination = bool(flag) or status is not None
+    if fraction == 1.0 and not claims_contamination:
+        raise ValueError(
+            "leakage_test_fraction == 1.0 requires explicit "
+            "contaminated_same_label_eval metadata; refusing to classify it as clean.")
+    if claims_contamination:
+        if not flag or status != 'CONTAMINATED_SAME_LABEL_EVALUATION':
+            raise ValueError(
+                "Contaminated experiment metadata is incomplete: set "
+                "contaminated_same_label_eval=true and evaluation_status="
+                "CONTAMINATED_SAME_LABEL_EVALUATION.")
+        return True
+    return False
+
+
+def load_leakage_indices(exp_dir, configured_fraction, contaminated):
+    """Load the recorded exposed test IDs, requiring the artifact for contaminated runs."""
+    path = os.path.join(exp_dir, 'leakage_test_indices.pt')
+    if os.path.exists(path):
+        return torch.load(path, map_location='cpu', weights_only=False).long().view(-1)
+    if contaminated:
+        raise FileNotFoundError(
+            f"CONTAMINATED_SAME_LABEL_EVALUATION requires {path}; refusing to evaluate "
+            "without the full exposed-test-ID artifact.")
+    if configured_fraction > 0:
+        raise FileNotFoundError(
+            f"{path} is missing even though config.json specifies a non-zero "
+            "leakage_test_fraction. Refusing to report ambiguous results.")
+    return torch.empty(0, dtype=torch.long)
 
 
 def main():
@@ -135,20 +197,11 @@ def main():
     graph_name = config.get('graph', 'causal')
     data = torch.load(os.path.join('data', 'processed', f'graph_{graph_name}.pt'), weights_only=False)
     print(f"Graph: {graph_name}")
+    contaminated = is_contaminated_same_label_config(config)
 
-    leakage_indices_path = os.path.join(args.exp_dir, 'leakage_test_indices.pt')
     configured_fraction = float(config.get('leakage_test_fraction', 0.0))
-    if os.path.exists(leakage_indices_path):
-        leakage_indices = torch.load(
-            leakage_indices_path, map_location='cpu', weights_only=False
-        ).long().view(-1)
-    elif configured_fraction > 0:
-        raise FileNotFoundError(
-            f"{leakage_indices_path} is missing even though config.json specifies "
-            "a non-zero leakage_test_fraction. Refusing to report ambiguous results."
-        )
-    else:
-        leakage_indices = torch.empty(0, dtype=torch.long)
+    leakage_indices = load_leakage_indices(
+        args.exp_dir, configured_fraction, contaminated)
 
     test_global_ids = torch.where(data.test_mask)[0].cpu()
     test_id_set = set(test_global_ids.tolist())
@@ -164,6 +217,8 @@ def main():
             f"test nodes, but file contains {len(leakage_list)}."
         )
     leakage_index_set = set(leakage_list)
+    if contaminated:
+        validate_contamination_metadata(config, leakage_indices, test_global_ids)
 
     model = build_model(config, data.x.size(1)).to(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -174,6 +229,14 @@ def main():
     test_logits, test_labels = predict(model, data, data.test_mask, device)
 
     results = compute_metrics(test_logits, test_labels)
+    if contaminated:
+        results['evaluation_status'] = 'CONTAMINATED_SAME_LABEL_EVALUATION'
+        results['valid_generalization_estimate'] = False
+        results['checkpoint_selection_metric'] = 'contaminated_test_pr_auc'
+        results['checkpoint_selection_warning'] = (
+            'The same test split was used for training and contaminated checkpoint selection.')
+        results['contamination_warning'] = ('All evaluated test labels were included in training. '
+                                            'This PR-AUC is not a valid measure of generalization.')
     results['graph'] = graph_name
     results['budgets'] = budget_report(val_logits, test_logits, test_labels, args.budgets)
 
@@ -211,8 +274,10 @@ def main():
         print(f"  best training epoch {b['epoch']} of {b['epochs_logged']} logged, "
               f"logged val PR-AUC {b['logged_val_pr_auc']:.4f}")
 
+    if contaminated:
+        print("CONTAMINATED SAME-LABEL EVALUATION RESULTS")
     print("Test results:")
-    print(f"  PR-AUC:  {results['pr_auc']:.4f}")
+    print(f"  Average Precision (AP; JSON field pr_auc): {results['pr_auc']:.4f}")
     print(f"  ROC-AUC: {results['roc_auc']:.4f}")
     leak = results['leakage_experiment']
     print(f"Leakage experiment: {leak['exposed_test_nodes']}/{leak['total_test_nodes']} "
