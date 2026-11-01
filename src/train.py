@@ -3,6 +3,7 @@ import argparse
 import json
 import sys
 import shutil
+import time
 from datetime import datetime
 
 import numpy as np
@@ -23,6 +24,27 @@ FANOUT = [25, 10]          # neighbours sampled per hop; evaluate.py uses the sa
 VAL_SAMPLE_SEED = 0        # fixed so validation scores are repeatable across epochs
 SELECTION_METRIC = 'pr_auc'
 GRAPH_CHOICES = ['causal', 'full']
+ACTIVE_SMOKE_METADATA_PATH = None
+
+
+def mark_smoke_failure(metadata_path, stage, error):
+    if not metadata_path or not os.path.exists(metadata_path):
+        return
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    metrics_path = os.path.join(os.path.dirname(metadata_path), 'metrics.json')
+    if os.path.exists(metrics_path):
+        with open(metrics_path, 'r') as f:
+            metadata['completed_epochs'] = len(json.load(f))
+    metadata.update({
+        'training_status': 'failed' if stage == 'training' else metadata.get('training_status'),
+        'overall_status': 'failed',
+        'failure_stage': stage,
+        'failure_message': str(error),
+        'failed_at': datetime.now().astimezone().isoformat(),
+    })
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=4)
 
 
 def build_parser(suppress_defaults=False):
@@ -64,6 +86,10 @@ def build_parser(suppress_defaults=False):
                         default=d if suppress_defaults else False,
                         help=('Deliberately train on every original test label and score those '
                               'same nodes. This is not a generalization evaluation.'))
+    parser.add_argument('--contaminated_three_way_same_label_eval', action='store_true',
+                        default=d if suppress_defaults else False,
+                        help=('Deliberately train on every original train, validation, and test '
+                              'label, then score the original test split.'))
     return parser
 
 
@@ -87,19 +113,32 @@ def load_config(args):
     if not 0.0 <= leak_fraction <= 1.0:
         raise ValueError("leakage_test_fraction must be between 0.0 and 1.0")
     config['leakage_test_fraction'] = leak_fraction
-    contaminated = bool(config.get('contaminated_same_label_eval', False))
+    three_way = bool(config.get('contaminated_three_way_same_label_eval', False))
+    contaminated = bool(config.get('contaminated_same_label_eval', False)) or three_way
     config['contaminated_same_label_eval'] = contaminated
+    config['contaminated_three_way_same_label_eval'] = three_way
+    if three_way:
+        validate_three_way_smoke_options(config)
     if contaminated:
         validate_contaminated_config(config)
+        if three_way:
+            if 'epochs' in explicit and int(config['epochs']) != 3:
+                raise ValueError("--contaminated_three_way_same_label_eval is a fixed 3-epoch smoke test")
+            if 'patience' in explicit and int(config['patience']) != 0:
+                raise ValueError("--contaminated_three_way_same_label_eval requires --patience 0")
+            config['epochs'] = 3
+            config['patience'] = 0
         config.update({
             'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
-            'training_splits': ['train', 'test'],
+            'training_splits': ['train', 'val', 'test'] if three_way else ['train', 'test'],
             'evaluation_split': 'test',
             'valid_generalization_estimate': False,
+            'validation_labels_used_as_training_targets': three_way,
         })
     else:
         contamination_fields = ('evaluation_status', 'training_splits', 'evaluation_split',
-                                'valid_generalization_estimate')
+                                'valid_generalization_estimate',
+                                'validation_labels_used_as_training_targets')
         if leak_fraction == 1.0:
             raise ValueError("--leakage_test_fraction 1.0 requires --contaminated_same_label_eval")
         if any(field in config for field in contamination_fields):
@@ -123,12 +162,15 @@ def validate_contaminated_config(config):
         raise ValueError("--contaminated_same_label_eval requires --graph causal")
     if not str(config.get('run_name') or '').startswith('CONTAMINATED_'):
         raise ValueError("--contaminated_same_label_eval requires a --run_name beginning with CONTAMINATED_")
+    three_way = bool(config.get('contaminated_three_way_same_label_eval', False))
     required = {
         'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
-        'training_splits': ['train', 'test'],
+        'training_splits': ['train', 'val', 'test'] if three_way else ['train', 'test'],
         'evaluation_split': 'test',
         'valid_generalization_estimate': False,
     }
+    if three_way:
+        required['validation_labels_used_as_training_targets'] = True
     contradictions = [key for key, expected in required.items()
                       if key in config and config[key] != expected]
     if contradictions:
@@ -136,9 +178,17 @@ def validate_contaminated_config(config):
                          + ', '.join(contradictions))
 
 
+def validate_three_way_smoke_options(config):
+    if config.get('resume_dir'):
+        raise ValueError("--contaminated_three_way_same_label_eval does not support --resume_dir; "
+                         "the smoke test must start from fresh initialization.")
+
+
 def build_training_mask(data, config):
     """Return training seeds and test IDs whose labels are deliberately exposed."""
     test_indices = torch.where(data.test_mask)[0]
+    if config.get('contaminated_three_way_same_label_eval', False):
+        return data.train_mask | data.val_mask | data.test_mask, test_indices
     if config.get('contaminated_same_label_eval', False):
         training_mask = data.train_mask | data.test_mask
         if torch.any(training_mask & data.val_mask):
@@ -177,6 +227,8 @@ def ensure_resumed_best_model(resume_dir, exp_dir, checkpoint):
 
 
 def selection_metric_name(config):
+    if config.get('contaminated_three_way_same_label_eval', False):
+        return 'final_epoch'
     return ('contaminated_test_pr_auc' if config.get('contaminated_same_label_eval', False)
             else 'val_pr_auc')
 
@@ -186,6 +238,13 @@ def should_save_checkpoint(best_selection_score, selection_value):
     return best_selection_score is None or selection_value > best_selection_score
 
 
+def checkpoint_is_due(config, epoch, best_selection_score, selection_value):
+    """Keep smoke tests final-epoch-only; preserve other runs' selection policies."""
+    if config.get('contaminated_three_way_same_label_eval', False):
+        return epoch == config['epochs']
+    return should_save_checkpoint(best_selection_score, selection_value)
+
+
 def validate_resume_config(old_config: dict, new_config: dict) -> None:
     """
     Refuses to resume if a model-defining or objective-defining field differs.
@@ -193,7 +252,8 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
     """
     always_checked = ['model', 'graph', 'hidden_channels', 'rank_loss_weight',
                       'ap_loss_weight', 'ap_temperature', 'selection_metric',
-                      'leakage_test_fraction', 'contaminated_same_label_eval']
+                      'leakage_test_fraction', 'contaminated_same_label_eval',
+                      'contaminated_three_way_same_label_eval']
     conditional_checked = ['heads', 'dropout']
 
     keys = list(always_checked)
@@ -204,7 +264,7 @@ def validate_resume_config(old_config: dict, new_config: dict) -> None:
 
     def value_for_compare(key, config):
         # Older clean checkpoints predate this flag; their absence means False.
-        if key == 'contaminated_same_label_eval':
+        if key in ('contaminated_same_label_eval', 'contaminated_three_way_same_label_eval'):
             return bool(config.get(key, False))
         return config.get(key)
 
@@ -273,6 +333,8 @@ def main():
         )
 
     set_seed(config['seed'])
+    run_started_at = datetime.now().astimezone().isoformat()
+    run_started_clock = time.perf_counter()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
@@ -323,8 +385,41 @@ def main():
     print(f"Training seed nodes total: {int(training_mask.sum()):,}")
     if config['contaminated_same_label_eval']:
         print("WARNING: CONTAMINATED_SAME_LABEL_EVALUATION.")
-        print("All original test labels are used for training and the same test nodes will be evaluated.")
+        if config['contaminated_three_way_same_label_eval']:
+            print("All original train, validation, and test labels are used for training; "
+                  "the original test nodes will be evaluated.")
+        else:
+            print("All original test labels are used for training and the same test nodes will be evaluated.")
         print("Reported PR-AUC is not a generalization estimate.")
+
+    smoke_metadata_path = None
+    if config['contaminated_three_way_same_label_eval']:
+        smoke_metadata_path = os.path.join(exp_dir, 'smoke_metadata.json')
+        global ACTIVE_SMOKE_METADATA_PATH
+        ACTIVE_SMOKE_METADATA_PATH = smoke_metadata_path
+        with open(smoke_metadata_path, 'w') as f:
+            json.dump({
+                'experiment_type': 'CONTAMINATED_THREE_WAY_SAME_LABEL_SMOKE_TEST',
+                'evaluation_status': 'CONTAMINATED_SAME_LABEL_EVALUATION',
+                'started_at': run_started_at,
+                'training_status': 'running',
+                'evaluation_stage_status': 'pending',
+                'overall_status': 'running',
+                'configured_epochs': config['epochs'],
+                'model': config['model'],
+                'graph': config['graph'],
+                'seed': config['seed'],
+                'training_target_splits': ['train', 'val', 'test'],
+                'split_counts': {
+                    'train': int(data.train_mask.sum()),
+                    'val': int(data.val_mask.sum()),
+                    'test': int(data.test_mask.sum()),
+                    'combined_training_targets': int(training_mask.sum()),
+                    'test_evaluation_targets': int(data.test_mask.sum()),
+                },
+                'checkpoint_path': os.path.join(exp_dir, 'best_model.pt'),
+                'metric_definition': 'Average Precision via sklearn.metrics.average_precision_score',
+            }, f, indent=4)
 
     train_loader = NeighborLoader(data, num_neighbors=FANOUT, batch_size=1024,
                                   input_nodes=training_mask, shuffle=True, num_workers=0)
@@ -332,7 +427,9 @@ def main():
                                 input_nodes=data.val_mask, shuffle=False, num_workers=0)
     contaminated_test_loader = NeighborLoader(
         data, num_neighbors=FANOUT, batch_size=2048, input_nodes=data.test_mask,
-        shuffle=False, num_workers=0) if config['contaminated_same_label_eval'] else None
+        shuffle=False, num_workers=0) if (
+            config['contaminated_same_label_eval'] and
+            not config['contaminated_three_way_same_label_eval']) else None
 
     start_epoch = 1
     best_selection_score = None
@@ -368,6 +465,7 @@ def main():
 
     print("Starting training...")
     for epoch in range(start_epoch, config['epochs'] + 1):
+        epoch_started_clock = time.perf_counter()
         model.train()
         total_loss, total_batches = 0.0, 0
         for batch in train_loader:
@@ -379,7 +477,8 @@ def main():
             loss = training_objective(criterion, seed_logits, seed_labels, config)
 
             if is_camouflage_model:
-                # Only train seed nodes supervise score_head, so no val/test labels reach it.
+                # score_head is supervised on the selected training seeds, which may
+                # deliberately include validation/test labels in contaminated modes.
                 node_scores = model.auxiliary_node_scores()[:batch.batch_size]
                 loss = loss + aux_loss_weight * criterion(node_scores, seed_labels.float())
 
@@ -398,6 +497,8 @@ def main():
             _, contaminated_metrics = validate(
                 model, contaminated_test_loader, criterion, config, device)
             selection_value = contaminated_metrics['pr_auc']
+        elif config['contaminated_three_way_same_label_eval']:
+            selection_value = None
         else:
             selection_value = val_score
 
@@ -410,18 +511,22 @@ def main():
         metrics_log.append({'epoch': epoch, 'train_loss': avg_train_loss,
                             'val_loss': avg_val_loss, 'val_score': val_score,
                             'selection_metric': selection_metric_name(config),
-                            'selection_score': selection_value, **val_metrics,
+                            'selection_score': selection_value,
+                            'epoch_duration_seconds': time.perf_counter() - epoch_started_clock,
+                            **val_metrics,
                             **({'contaminated_test_pr_auc': contaminated_metrics['pr_auc'],
                                 'contaminated_test_roc_auc': contaminated_metrics['roc_auc']}
                                if contaminated_metrics is not None else {})})
         with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
             json.dump(metrics_log, f, indent=4)
 
-        if should_save_checkpoint(best_selection_score, selection_value):
+        if checkpoint_is_due(config, epoch, best_selection_score, selection_value):
             best_selection_score = selection_value
             torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
                         'epoch': epoch, 'best_selection_score': best_selection_score,
                         'selection_metric': selection_metric_name(config),
+                        'checkpoint_policy': ('final_epoch' if config['contaminated_three_way_same_label_eval']
+                                              else 'metric_selected'),
                         'contaminated_test_pr_auc': (contaminated_metrics or {}).get('pr_auc')},
                        os.path.join(exp_dir, 'best_model.pt'))
             print("  --> saved new best model")
@@ -442,8 +547,28 @@ def main():
 
     with open(os.path.join(exp_dir, 'metrics.json'), 'w') as f:
         json.dump(metrics_log, f, indent=4)
+    if smoke_metadata_path:
+        with open(smoke_metadata_path, 'r') as f:
+            smoke_metadata = json.load(f)
+        smoke_metadata.update({
+            'training_status': 'completed',
+            'evaluation_stage_status': 'pending',
+            'overall_status': 'evaluation_pending',
+            'completed_at': datetime.now().astimezone().isoformat(),
+            'completed_epochs': len([row for row in metrics_log if row['epoch'] >= start_epoch]),
+            'training_duration_seconds': time.perf_counter() - run_started_clock,
+            'checkpoint_selection_metric': selection_metric_name(config),
+            'checkpoint_policy': 'final_epoch',
+            'checkpoint_epoch': config['epochs'],
+        })
+        with open(smoke_metadata_path, 'w') as f:
+            json.dump(smoke_metadata, f, indent=4)
     print("Training finished.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        mark_smoke_failure(ACTIVE_SMOKE_METADATA_PATH, 'training', error)
+        raise
